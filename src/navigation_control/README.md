@@ -71,7 +71,19 @@
   - `serial_tx_hex` (std_msgs/String) - 十六进制字符串(调试)
   - `processed_cmd_vel` (geometry_msgs/Twist) - 处理后的速度
 
-### 5. Robot State Manager (机器人状态管理)
+### 5. Serial Communication (串口通信) ⭐ 新增
+- **功能**：通过 Micro USB 与下位机开发板进行实际串口通信
+- **订阅**：`serial_tx_data` (std_msgs/UInt8MultiArray) - 接收待发送数据
+- **发布**：
+  - `serial_rx_data` (std_msgs/UInt8MultiArray) - 从下位机接收的数据
+  - `serial_rx_hex` (std_msgs/String) - 接收数据的十六进制显示
+  - `serial_connection_status` (std_msgs/String) - 连接状态和统计信息
+- **特性**：
+  - 自动重连 (5秒检测间隔)
+  - 发送/接收字节统计
+  - 可配置波特率 (9600~921600)
+
+### 6. Robot State Manager (机器人状态管理)
 - **功能**：统一管理系统状态和模式切换
 - **服务**：
   - `switch_to_mapping` - 切换到建图模式
@@ -185,6 +197,38 @@ ros2 topic echo /mapping_status
 
 # 查看定位状态
 ros2 topic echo /localization_status
+
+# 查看串口连接状态
+ros2 topic echo /serial_connection_status
+
+# 查看发送给下位机的数据 (十六进制)
+ros2 topic echo /serial_tx_hex
+
+# 查看从下位机接收的数据 (十六进制)
+ros2 topic echo /serial_rx_hex
+```
+
+### 5. 串口通信配置
+
+详细说明请参考: [串口通信使用指南](docs/SERIAL_COMMUNICATION.md)
+
+**快速配置**:
+```bash
+# 检查串口设备
+ls -l /dev/ttyUSB*
+
+# 设置串口权限
+sudo chmod 666 /dev/ttyUSB1
+
+# 或永久添加权限
+sudo usermod -a -G dialout $USER
+newgrp dialout
+
+# 使用自定义串口启动
+ros2 launch navigation_control mapping.launch.py \
+    dev_board_port:=/dev/ttyACM0 \
+    dev_board_baudrate:=230400
+```
 
 # 查看导航状态
 ros2 topic echo /navigation_status

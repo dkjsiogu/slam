@@ -38,9 +38,23 @@ def generate_launch_description():
         description='Use simulation time'
     )
     
+    dev_board_port_arg = DeclareLaunchArgument(
+        'dev_board_port',
+        default_value='/dev/ttyUSB1',
+        description='Development board serial port (Micro USB)'
+    )
+    
+    dev_board_baudrate_arg = DeclareLaunchArgument(
+        'dev_board_baudrate',
+        default_value='115200',
+        description='Development board baudrate'
+    )
+    
     return LaunchDescription([
         map_file_arg,
         use_sim_time_arg,
+        dev_board_port_arg,
+        dev_board_baudrate_arg,
         
         # RPLIDAR节点
         Node(
@@ -208,6 +222,19 @@ def generate_launch_description():
                 'angular_scale': 1000.0,
                 'velocity_timeout': 1.0,
                 'smooth_factor': 0.8,
+            }],
+        ),
+        
+        # Serial Communication节点 (Micro USB连接下位机)
+        Node(
+            package='navigation_control',
+            executable='serial_communication',
+            name='serial_communication',
+            output='screen',
+            parameters=[{
+                'serial_port': LaunchConfiguration('dev_board_port'),
+                'baudrate': LaunchConfiguration('dev_board_baudrate'),
+                'timeout_ms': 100,
             }],
         ),
         

@@ -23,6 +23,10 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(nav2_util REQUIRED)
 
+# 串口库
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SERIAL REQUIRED libserial)
+
 set(dependencies
   rclcpp
   rclcpp_action
@@ -43,6 +47,7 @@ set(dependencies
 # Include directories
 include_directories(
   include
+  ${SERIAL_INCLUDE_DIRS}
 )
 
 # Mapping Manager Node
@@ -75,12 +80,21 @@ add_executable(robot_state_manager
 )
 ament_target_dependencies(robot_state_manager ${dependencies})
 
+# Serial Communication Node (实际串口通信)
+add_executable(serial_communication
+  src/serial_communication.cpp
+)
+ament_target_dependencies(serial_communication ${dependencies})
+target_link_libraries(serial_communication ${SERIAL_LIBRARIES})
+
 # Install executables
 install(TARGETS
   mapping_manager
   localization_manager
   navigation_controller
   serial_data_publisher
+  robot_state_manager
+  serial_communication
   robot_state_manager
   DESTINATION lib/${PROJECT_NAME}
 )
