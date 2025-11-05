@@ -87,6 +87,24 @@ add_executable(serial_communication
 ament_target_dependencies(serial_communication ${dependencies})
 target_link_libraries(serial_communication ${SERIAL_LIBRARIES})
 
+# Obstacle Monitor Node (障碍物监控)
+add_executable(obstacle_monitor
+  src/obstacle_monitor.cpp
+)
+ament_target_dependencies(obstacle_monitor ${dependencies})
+
+# Manual Goal Setter Node (手动目标点设置)
+add_executable(manual_goal_setter
+  src/manual_goal_setter.cpp
+)
+ament_target_dependencies(manual_goal_setter ${dependencies})
+
+# Omni Wheel Controller Node (全向轮控制器)
+add_executable(omni_wheel_controller
+  src/omni_wheel_controller.cpp
+)
+ament_target_dependencies(omni_wheel_controller ${dependencies})
+
 # Install executables
 install(TARGETS
   mapping_manager
@@ -95,7 +113,9 @@ install(TARGETS
   serial_data_publisher
   robot_state_manager
   serial_communication
-  robot_state_manager
+  obstacle_monitor
+  manual_goal_setter
+  omni_wheel_controller
   DESTINATION lib/${PROJECT_NAME}
 )
 
