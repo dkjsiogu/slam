@@ -40,7 +40,7 @@ def generate_launch_description():
     
     dev_board_port_arg = DeclareLaunchArgument(
         'dev_board_port',
-        default_value='/dev/ttyUSB1',
+        default_value='/dev/stm32',
         description='Development board serial port (Micro USB)'
     )
     
@@ -146,11 +146,11 @@ def generate_launch_description():
             parameters=[os.path.join(config_dir, 'nav2_params.yaml')],
         ),
         
-        # Nav2 Recoveries Server
+        # Nav2 Behaviors Server (formerly recoveries)
         Node(
-            package='nav2_recoveries',
-            executable='recoveries_server',
-            name='recoveries_server',
+            package='nav2_behaviors',
+            executable='behavior_server',
+            name='behavior_server',
             output='screen',
             parameters=[os.path.join(config_dir, 'nav2_params.yaml')],
         ),
@@ -168,7 +168,7 @@ def generate_launch_description():
                     'bt_navigator',
                     'controller_server',
                     'planner_server',
-                    'recoveries_server'
+                    'behavior_server'
                 ]
             }],
         ),

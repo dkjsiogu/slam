@@ -28,13 +28,13 @@ def generate_launch_description():
     
     serial_port_arg = DeclareLaunchArgument(
         'serial_port',
-        default_value='/dev/ttyUSB0',
+        default_value='/dev/radar',
         description='LIDAR serial port'
     )
     
     dev_board_port_arg = DeclareLaunchArgument(
         'dev_board_port',
-        default_value='/dev/ttyUSB1',
+        default_value='/dev/stm32',
         description='Development board serial port (Micro USB)'
     )
     
@@ -64,9 +64,27 @@ def generate_launch_description():
                 'inverted': False,
                 'angle_compensate': True,
             }],
+            remappings=[
+                ('/scan', '/scan_raw'),  # 重命名原始扫描
+            ],
         ),
         
-        # Cartographer节点
+        # 激光扫描过滤器 (过滤机器人本体)
+        Node(
+            package='navigation_control',
+            executable='scan_filter_node',
+            name='scan_filter_node',
+            output='screen',
+            parameters=[{
+                'filter_angle_min': -2.42,  # -138.87° (右后角)
+                'filter_angle_max': 2.84,   # 163.00° (左后角)
+                'filter_range_max': 0.35,   # 只过滤 0.35m 以内的点
+                'input_topic': '/scan_raw',
+                'output_topic': '/scan',  # 输出到标准话题
+            }],
+        ),
+        
+        # Cartographer节点 (使用过滤后的扫描数据)
         Node(
             package='cartographer_ros',
             executable='cartographer_node',

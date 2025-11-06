@@ -87,6 +87,12 @@ add_executable(serial_communication
 ament_target_dependencies(serial_communication ${dependencies})
 target_link_libraries(serial_communication ${SERIAL_LIBRARIES})
 
+# Scan Filter Node (激光扫描过滤 - 过滤机器人本体)
+add_executable(scan_filter_node
+  src/scan_filter_node.cpp
+)
+ament_target_dependencies(scan_filter_node ${dependencies})
+
 # Obstacle Monitor Node (障碍物监控)
 add_executable(obstacle_monitor
   src/obstacle_monitor.cpp
@@ -113,6 +119,7 @@ install(TARGETS
   serial_data_publisher
   robot_state_manager
   serial_communication
+  scan_filter_node
   obstacle_monitor
   manual_goal_setter
   omni_wheel_controller
@@ -125,9 +132,24 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+# Install Python scripts
+install(PROGRAMS
+  scripts/simple_goal_controller.py
+  scripts/map_republisher.py
+  scripts/initial_pose_setter.py
+  scripts/relocalize.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install config files
 install(DIRECTORY
   config
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+# Install URDF files
+install(DIRECTORY
+  urdf
   DESTINATION share/${PROJECT_NAME}/
 )
 

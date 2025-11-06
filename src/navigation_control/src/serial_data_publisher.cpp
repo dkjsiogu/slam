@@ -1,17 +1,19 @@
 /**
  * @file serial_data_publisher.cpp
- * @brief 串口数据发布器 - 准备发送给下位机的控制数据
+ * @brief 全向轮控制 - 串口数据发布器
  * 
  * 功能:
- * 1. 订阅Nav2的速度命令 (/cmd_vel)
- * 2. 将速度命令转换为下位机协议格式
- * 3. 发布准备好的串口数据 (待串口模块接入)
- * 4. 提供速度限制和平滑处理
+ * 1. 订阅速度命令 (/cmd_vel)
+ * 2. 转换为下位机协议: vx(m/s), vy(m/s), wz(rad/s)
+ * 3. 通过串口发送给下位机全向轮控制器
  * 
- * 数据格式准备:
- * - 线速度 (m/s) -> 转换为下位机单位 (mm/s 或 编码器脉冲)
- * - 角速度 (rad/s) -> 转换为下位机单位
- * - 添加校验和、帧头帧尾等
+ * 协议格式 (19字节):
+ * - header: 0xA5
+ * - vx: float (4字节) - 前后速度 m/s
+ * - vy: float (4字节) - 左右速度 m/s  
+ * - wz: float (4字节) - 旋转速度 rad/s
+ * - timestamp: uint32_t (4字节) - 时间戳 ms
+ * - checksum: uint16_t (2字节) - CRC16校验
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -24,41 +26,73 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
 
 using namespace std::chrono_literals;
 
-// 串口协议结构体 (示例)
-struct SerialProtocol {
-    uint8_t header1 = 0xAA;      // 帧头1
-    uint8_t header2 = 0x55;      // 帧头2
-    uint8_t cmd_id = 0x01;       // 命令ID: 0x01=速度控制
-    int16_t linear_vel;          // 线速度 (mm/s)
-    int16_t angular_vel;         // 角速度 (mrad/s, 毫弧度/秒)
-    uint8_t reserved1 = 0x00;    // 保留字节
-    uint8_t reserved2 = 0x00;    // 保留字节
-    uint8_t checksum;            // 校验和 (所有字节异或)
-    uint8_t tail = 0x0D;         // 帧尾
+// CRC16校验表 (与下位机一致)
+static const uint16_t CRC16_TABLE[256] = {
+  0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf, 0x8c48, 0x9dc1, 0xaf5a, 0xbed3,
+  0xca6c, 0xdbe5, 0xe97e, 0xf8f7, 0x1081, 0x0108, 0x3393, 0x221a, 0x56a5, 0x472c, 0x75b7, 0x643e,
+  0x9cc9, 0x8d40, 0xbfdb, 0xae52, 0xdaed, 0xcb64, 0xf9ff, 0xe876, 0x2102, 0x308b, 0x0210, 0x1399,
+  0x6726, 0x76af, 0x4434, 0x55bd, 0xad4a, 0xbcc3, 0x8e58, 0x9fd1, 0xeb6e, 0xfae7, 0xc87c, 0xd9f5,
+  0x3183, 0x200a, 0x1291, 0x0318, 0x77a7, 0x662e, 0x54b5, 0x453c, 0xbdcb, 0xac42, 0x9ed9, 0x8f50,
+  0xfbef, 0xea66, 0xd8fd, 0xc974, 0x4204, 0x538d, 0x6116, 0x709f, 0x0420, 0x15a9, 0x2732, 0x36bb,
+  0xce4c, 0xdfc5, 0xed5e, 0xfcd7, 0x8868, 0x99e1, 0xab7a, 0xbaf3, 0x5285, 0x430c, 0x7197, 0x601e,
+  0x14a1, 0x0528, 0x37b3, 0x263a, 0xdecd, 0xcf44, 0xfddf, 0xec56, 0x98e9, 0x8960, 0xbbfb, 0xaa72,
+  0x6306, 0x728f, 0x4014, 0x519d, 0x2522, 0x34ab, 0x0630, 0x17b9, 0xef4e, 0xfec7, 0xcc5c, 0xddd5,
+  0xa96a, 0xb8e3, 0x8a78, 0x9bf1, 0x7387, 0x620e, 0x5095, 0x411c, 0x35a3, 0x242a, 0x16b1, 0x0738,
+  0xffcf, 0xee46, 0xdcdd, 0xcd54, 0xb9eb, 0xa862, 0x9af9, 0x8b70, 0x8408, 0x9581, 0xa71a, 0xb693,
+  0xc22c, 0xd3a5, 0xe13e, 0xf0b7, 0x0840, 0x19c9, 0x2b52, 0x3adb, 0x4e64, 0x5fed, 0x6d76, 0x7cff,
+  0x9489, 0x8500, 0xb79b, 0xa612, 0xd2ad, 0xc324, 0xf1bf, 0xe036, 0x18c1, 0x0948, 0x3bd3, 0x2a5a,
+  0x5ee5, 0x4f6c, 0x7df7, 0x6c7e, 0xa50a, 0xb483, 0x8618, 0x9791, 0xe32e, 0xf2a7, 0xc03c, 0xd1b5,
+  0x2942, 0x38cb, 0x0a50, 0x1bd9, 0x6f66, 0x7eef, 0x4c74, 0x5dfd, 0xb58b, 0xa402, 0x9699, 0x8710,
+  0xf3af, 0xe226, 0xd0bd, 0xc134, 0x39c3, 0x284a, 0x1ad1, 0x0b58, 0x7fe7, 0x6e6e, 0x5cf5, 0x4d7c,
+  0xc60c, 0xd785, 0xe51e, 0xf497, 0x8028, 0x91a1, 0xa33a, 0xb2b3, 0x4a44, 0x5bcd, 0x6956, 0x78df,
+  0x0c60, 0x1de9, 0x2f72, 0x3efb, 0xd68d, 0xc704, 0xf59f, 0xe416, 0x90a9, 0x8120, 0xb3bb, 0xa232,
+  0x5ac5, 0x4b4c, 0x79d7, 0x685e, 0x1ce1, 0x0d68, 0x3ff3, 0x2e7a, 0xe70e, 0xf687, 0xc41c, 0xd595,
+  0xa12a, 0xb0a3, 0x8238, 0x93b1, 0x6b46, 0x7acf, 0x4854, 0x59dd, 0x2d62, 0x3ceb, 0x0e70, 0x1ff9,
+  0xf78f, 0xe606, 0xd49d, 0xc514, 0xb1ab, 0xa022, 0x92b9, 0x8330, 0x7bc7, 0x6a4e, 0x58d5, 0x495c,
+  0x3de3, 0x2c6a, 0x1ef1, 0x0f78};
+
+#define CRC16_INIT 0xFFFF
+
+// CRC16计算函数 (与下位机完全一致)
+uint16_t Get_CRC16_Check_Sum(const uint8_t *pchMessage, uint32_t dwLength, uint16_t wCRC)
+{
+    uint8_t ch_data;
+    if (pchMessage == nullptr) return 0xFFFF;
+    while (dwLength--) {
+        ch_data = *pchMessage++;
+        wCRC = ((uint16_t)(wCRC) >> 8) ^ CRC16_TABLE[((uint16_t)(wCRC) ^ (uint16_t)(ch_data)) & 0x00ff];
+    }
+    return wCRC;
+}
+
+// 全向轮控制协议 (简化版，19字节)
+struct __attribute__((packed)) OmniWheelCmd {
+    uint8_t header;        // 0xA5
+    float vx;              // 前后速度 (m/s)
+    float vy;              // 左右速度 (m/s)
+    float wz;              // 旋转速度 (rad/s)
+    uint32_t timestamp;    // 时间戳 (ms)
+    uint16_t checksum;     // CRC16校验
     
-    // 计算校验和
+    // 计算CRC16
     void calculateChecksum() {
-        checksum = header1 ^ header2 ^ cmd_id ^ 
-                  (linear_vel & 0xFF) ^ ((linear_vel >> 8) & 0xFF) ^
-                  (angular_vel & 0xFF) ^ ((angular_vel >> 8) & 0xFF) ^
-                  reserved1 ^ reserved2;
+        checksum = Get_CRC16_Check_Sum(
+            reinterpret_cast<const uint8_t*>(this), 
+            sizeof(OmniWheelCmd) - 2, 
+            CRC16_INIT
+        );
     }
     
     // 转换为字节数组
     std::vector<uint8_t> toBytes() {
         calculateChecksum();
-        return {
-            header1, header2, cmd_id,
-            static_cast<uint8_t>(linear_vel & 0xFF),
-            static_cast<uint8_t>((linear_vel >> 8) & 0xFF),
-            static_cast<uint8_t>(angular_vel & 0xFF),
-            static_cast<uint8_t>((angular_vel >> 8) & 0xFF),
-            reserved1, reserved2,
-            checksum, tail
-        };
+        std::vector<uint8_t> bytes(sizeof(OmniWheelCmd));
+        memcpy(bytes.data(), this, sizeof(OmniWheelCmd));
+        return bytes;
     }
 };
 
@@ -68,17 +102,15 @@ public:
     SerialDataPublisher() : Node("serial_data_publisher")
     {
         // 声明参数
-        this->declare_parameter("max_linear_vel", 1.0);      // 最大线速度 m/s
-        this->declare_parameter("max_angular_vel", 2.0);     // 最大角速度 rad/s
-        this->declare_parameter("linear_scale", 1000.0);     // 线速度缩放 (m/s -> mm/s)
-        this->declare_parameter("angular_scale", 1000.0);    // 角速度缩放 (rad/s -> mrad/s)
-        this->declare_parameter("velocity_timeout", 1.0);    // 速度命令超时(秒)
-        this->declare_parameter("smooth_factor", 0.8);       // 速度平滑因子 (0-1)
+        this->declare_parameter("max_vx", 1.0);           // 最大前后速度 m/s
+        this->declare_parameter("max_vy", 1.0);           // 最大左右速度 m/s
+        this->declare_parameter("max_wz", 2.0);           // 最大旋转速度 rad/s
+        this->declare_parameter("velocity_timeout", 1.0); // 速度超时 s
+        this->declare_parameter("smooth_factor", 0.7);    // 平滑因子 0-1
         
-        max_linear_vel_ = this->get_parameter("max_linear_vel").as_double();
-        max_angular_vel_ = this->get_parameter("max_angular_vel").as_double();
-        linear_scale_ = this->get_parameter("linear_scale").as_double();
-        angular_scale_ = this->get_parameter("angular_scale").as_double();
+        max_vx_ = this->get_parameter("max_vx").as_double();
+        max_vy_ = this->get_parameter("max_vy").as_double();
+        max_wz_ = this->get_parameter("max_wz").as_double();
         velocity_timeout_ = this->get_parameter("velocity_timeout").as_double();
         smooth_factor_ = this->get_parameter("smooth_factor").as_double();
         
@@ -87,35 +119,24 @@ public:
             "/cmd_vel", 10,
             std::bind(&SerialDataPublisher::cmdVelCallback, this, std::placeholders::_1));
         
-        // 发布原始字节数据 (待串口模块使用)
+        // 发布串口数据
         serial_data_pub_ = this->create_publisher<std_msgs::msg::UInt8MultiArray>(
             "serial_tx_data", 10);
         
-        // 发布可读的十六进制字符串 (调试用)
+        // 发布调试信息
         serial_hex_pub_ = this->create_publisher<std_msgs::msg::String>(
             "serial_tx_hex", 10);
         
-        // 发布处理后的速度 (调试用)
-        processed_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
-            "processed_cmd_vel", 10);
-        
-        // 状态发布器
-        status_pub_ = this->create_publisher<std_msgs::msg::String>(
-            "serial_status", 10);
-        
-        // 定时器 - 检查速度命令超时
+        // 定时器 - 检查超时
         timeout_timer_ = this->create_wall_timer(
             100ms, std::bind(&SerialDataPublisher::checkTimeout, this));
         
-        // 定时器 - 发布状态
-        status_timer_ = this->create_wall_timer(
-            1s, std::bind(&SerialDataPublisher::publishStatus, this));
+        // 初始化时间戳
+        last_cmd_time_ = this->now();
         
-        RCLCPP_INFO(this->get_logger(), "Serial Data Publisher initialized");
-        RCLCPP_INFO(this->get_logger(), "Max linear velocity: %.2f m/s", max_linear_vel_);
-        RCLCPP_INFO(this->get_logger(), "Max angular velocity: %.2f rad/s", max_angular_vel_);
-        RCLCPP_INFO(this->get_logger(), "Linear scale: %.0f (m/s -> mm/s)", linear_scale_);
-        RCLCPP_INFO(this->get_logger(), "Angular scale: %.0f (rad/s -> mrad/s)", angular_scale_);
+        RCLCPP_INFO(this->get_logger(), "全向轮控制节点已初始化");
+        RCLCPP_INFO(this->get_logger(), "最大速度 - Vx: %.2f m/s, Vy: %.2f m/s, Wz: %.2f rad/s", 
+                    max_vx_, max_vy_, max_wz_);
     }
 
 private:
@@ -124,126 +145,95 @@ private:
     {
         last_cmd_time_ = this->now();
         
-        // 获取原始速度
-        double linear = msg->linear.x;
-        double angular = msg->angular.z;
+        // 获取速度
+        double vx = msg->linear.x;   // 前后
+        double vy = msg->linear.y;   // 左右
+        double wz = msg->angular.z;  // 旋转
         
-        // 速度限制
-        linear = std::clamp(linear, -max_linear_vel_, max_linear_vel_);
-        angular = std::clamp(angular, -max_angular_vel_, max_angular_vel_);
+        // 限幅
+        vx = std::clamp(vx, -max_vx_, max_vx_);
+        vy = std::clamp(vy, -max_vy_, max_vy_);
+        wz = std::clamp(wz, -max_wz_, max_wz_);
         
-        // 速度平滑 (低通滤波)
-        smoothed_linear_ = smooth_factor_ * smoothed_linear_ + (1.0 - smooth_factor_) * linear;
-        smoothed_angular_ = smooth_factor_ * smoothed_angular_ + (1.0 - smooth_factor_) * angular;
+        // 平滑滤波
+        smoothed_vx_ = smooth_factor_ * smoothed_vx_ + (1.0 - smooth_factor_) * vx;
+        smoothed_vy_ = smooth_factor_ * smoothed_vy_ + (1.0 - smooth_factor_) * vy;
+        smoothed_wz_ = smooth_factor_ * smoothed_wz_ + (1.0 - smooth_factor_) * wz;
         
-        // 发布处理后的速度 (调试用)
-        auto processed_msg = geometry_msgs::msg::Twist();
-        processed_msg.linear.x = smoothed_linear_;
-        processed_msg.angular.z = smoothed_angular_;
-        processed_vel_pub_->publish(processed_msg);
-        
-        // 准备串口数据
-        prepareSerialData(smoothed_linear_, smoothed_angular_);
-        
-        packets_sent_++;
+        // 发送
+        sendSerialData(smoothed_vx_, smoothed_vy_, smoothed_wz_);
     }
     
-    // 准备串口数据
-    void prepareSerialData(double linear_vel, double angular_vel)
+    // 发送串口数据
+    void sendSerialData(double vx, double vy, double wz)
     {
-        SerialProtocol packet;
+        OmniWheelCmd packet;
+        packet.header = 0xA5;
+        packet.vx = static_cast<float>(vx);
+        packet.vy = static_cast<float>(vy);
+        packet.wz = static_cast<float>(wz);
+        packet.timestamp = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()
+            ).count()
+        );
         
-        // 转换为下位机单位
-        packet.linear_vel = static_cast<int16_t>(linear_vel * linear_scale_);
-        packet.angular_vel = static_cast<int16_t>(angular_vel * angular_scale_);
-        
-        // 转换为字节数组
         auto bytes = packet.toBytes();
         
-        // 发布原始字节数据
+        // 发布字节数据
         auto data_msg = std_msgs::msg::UInt8MultiArray();
         data_msg.data = bytes;
         serial_data_pub_->publish(data_msg);
         
-        // 发布十六进制字符串 (便于调试)
-        std::stringstream hex_stream;
-        hex_stream << "TX: ";
-        for (uint8_t byte : bytes) {
-            hex_stream << std::hex << std::setw(2) << std::setfill('0') 
-                      << static_cast<int>(byte) << " ";
+        // 发布十六进制 (调试)
+        std::stringstream hex;
+        hex << "TX[" << bytes.size() << "]: ";
+        for (uint8_t b : bytes) {
+            hex << std::hex << std::setw(2) << std::setfill('0') << (int)b << " ";
         }
         
         auto hex_msg = std_msgs::msg::String();
-        hex_msg.data = hex_stream.str();
+        hex_msg.data = hex.str();
         serial_hex_pub_->publish(hex_msg);
         
-        RCLCPP_DEBUG(this->get_logger(), 
-                    "Serial data - Linear: %d mm/s, Angular: %d mrad/s, Hex: %s",
-                    packet.linear_vel, packet.angular_vel, hex_msg.data.c_str());
+        RCLCPP_DEBUG(this->get_logger(), "发送: vx=%.2f vy=%.2f wz=%.2f", vx, vy, wz);
     }
     
-    // 检查速度命令超时
+    // 超时检查
     void checkTimeout()
     {
-        auto now = this->now();
-        auto elapsed = (now - last_cmd_time_).seconds();
-        
-        if (elapsed > velocity_timeout_ && 
-            (std::abs(smoothed_linear_) > 0.01 || std::abs(smoothed_angular_) > 0.01)) {
-            
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                               "Velocity command timeout (%.1fs) - sending stop command", elapsed);
-            
-            // 发送停止命令
-            smoothed_linear_ = 0.0;
-            smoothed_angular_ = 0.0;
-            prepareSerialData(0.0, 0.0);
-        }
-    }
-    
-    // 发布状态
-    void publishStatus()
-    {
-        auto msg = std_msgs::msg::String();
-        
         auto elapsed = (this->now() - last_cmd_time_).seconds();
         
-        if (elapsed < velocity_timeout_) {
-            msg.data = "ACTIVE - Linear: " + 
-                      std::to_string(static_cast<int>(smoothed_linear_ * 1000)) + " mm/s, " +
-                      "Angular: " + 
-                      std::to_string(static_cast<int>(smoothed_angular_ * 1000)) + " mrad/s, " +
-                      "Packets: " + std::to_string(packets_sent_);
-        } else {
-            msg.data = "IDLE - Total packets sent: " + std::to_string(packets_sent_);
+        if (elapsed > velocity_timeout_ && 
+            (std::abs(smoothed_vx_) > 0.01 || std::abs(smoothed_vy_) > 0.01 || std::abs(smoothed_wz_) > 0.01)) {
+            
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "速度命令超时 (%.1fs)，发送停止命令", elapsed);
+            
+            smoothed_vx_ = 0.0;
+            smoothed_vy_ = 0.0;
+            smoothed_wz_ = 0.0;
+            sendSerialData(0.0, 0.0, 0.0);
         }
-        
-        status_pub_->publish(msg);
     }
     
     // 成员变量
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
-    
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr serial_data_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr serial_hex_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr processed_vel_pub_;
-    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
-    
     rclcpp::TimerBase::SharedPtr timeout_timer_;
-    rclcpp::TimerBase::SharedPtr status_timer_;
     
-    double max_linear_vel_;
-    double max_angular_vel_;
-    double linear_scale_;
-    double angular_scale_;
+    double max_vx_;
+    double max_vy_;
+    double max_wz_;
     double velocity_timeout_;
     double smooth_factor_;
     
-    double smoothed_linear_{0.0};
-    double smoothed_angular_{0.0};
+    double smoothed_vx_{0.0};
+    double smoothed_vy_{0.0};
+    double smoothed_wz_{0.0};
     
     rclcpp::Time last_cmd_time_;
-    int packets_sent_{0};
 };
 
 int main(int argc, char** argv)

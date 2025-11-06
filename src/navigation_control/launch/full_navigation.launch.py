@@ -13,13 +13,13 @@ def generate_launch_description():
     # 声明参数
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port',
-        default_value='/dev/ttyUSB0',
+        default_value='/dev/radar',
         description='LIDAR serial port'
     )
     
     dev_board_port_arg = DeclareLaunchArgument(
         'dev_board_port',
-        default_value='/dev/ttyUSB1',
+        default_value='/dev/stm32',
         description='Development board serial port (Micro USB)'
     )
     
@@ -90,14 +90,29 @@ def generate_launch_description():
             name='omni_wheel_controller',
             output='screen',
             parameters=[{
-                'max_vx': 1.0,                # 最大前后速度 m/s
-                'max_vy': 1.0,                # 最大左右速度 m/s
+                'max_vx': 5.0,                # 最大前后速度 m/s
+                'max_vy': 5.0,                # 最大左右速度 m/s
                 'max_wz': 2.0,                # 最大旋转速度 rad/s
                 'velocity_scale': 1000.0,     # m/s -> mm/s
                 'angular_scale': 1000.0,      # rad/s -> mrad/s
                 'velocity_timeout': 1.0,      # 超时时间
                 'smooth_factor': 0.7,         # 平滑系数
                 'enable_lateral_motion': True,# 启用侧向运动
+            }],
+        ),
+        
+        # ============ 串口数据发布器 (全向轮协议) ============
+        Node(
+            package='navigation_control',
+            executable='serial_data_publisher',
+            name='serial_data_publisher',
+            output='screen',
+            parameters=[{
+                'max_vx': 5.0,
+                'max_vy': 5.0,
+                'max_wz': 2.0,
+                'velocity_timeout': 1.0,
+                'smooth_factor': 0.7,
             }],
         ),
         
