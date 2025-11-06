@@ -111,6 +111,12 @@ add_executable(omni_wheel_controller
 )
 ament_target_dependencies(omni_wheel_controller ${dependencies})
 
+# Wheel Odometry Node (轮式里程计节点)
+add_executable(wheel_odometry_node
+  src/wheel_odometry_node.cpp
+)
+ament_target_dependencies(wheel_odometry_node ${dependencies})
+
 # Install executables
 install(TARGETS
   mapping_manager
@@ -123,6 +129,7 @@ install(TARGETS
   obstacle_monitor
   manual_goal_setter
   omni_wheel_controller
+  wheel_odometry_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

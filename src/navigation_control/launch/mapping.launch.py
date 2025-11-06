@@ -107,22 +107,27 @@ def generate_launch_description():
             arguments=['-resolution', '0.05'],
         ),
         
-        # TF静态变换 - odom -> base_link
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='odom_to_base_link',
-            arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
-            output='screen'
-        ),
-        
-        # TF静态变换 - base_link -> laser
+        # TF静态变换 - base_link -> laser (移除odom->base_link，由里程计节点发布)
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='base_link_to_laser',
             arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'laser'],
             output='screen'
+        ),
+        
+        # Wheel Odometry Node (轮式里程计 - 发布odom->base_link TF)
+        Node(
+            package='navigation_control',
+            executable='wheel_odometry_node',
+            name='wheel_odometry_node',
+            output='screen',
+            parameters=[{
+                'odom_frame': 'odom',
+                'base_frame': 'base_link',
+                'publish_tf': True,
+                'enable_crc_check': True,
+            }],
         ),
         
         # Mapping Manager节点
