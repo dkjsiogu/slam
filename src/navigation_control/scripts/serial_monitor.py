@@ -83,11 +83,10 @@ class SerialMonitor(Node):
                 wz = delta_theta / dt
                 
                 self.get_logger().info('─' * 80)
-                self.get_logger().info(f'[下位机里程计数据 - 50ms窗口积分]')
-                self.get_logger().info(f'  机器人坐标系增量: dx={delta_x_robot:7.4f}m  dy={delta_y_robot:7.4f}m  dθ={delta_theta:7.4f}rad')
+                self.get_logger().info(f'[下位机里程计数据 - 带阈值过滤]')
+                self.get_logger().info(f'  机器人坐标系增量: dx={delta_x_robot:7.4f}m  dy={delta_y_robot:7.4f}m  dθ={delta_theta:7.4f}rad (已过滤<1mm)')
                 self.get_logger().info(f'  世界坐标系增量:   dx={delta_x_world:7.4f}m  dy={delta_y_world:7.4f}m')
                 self.get_logger().info(f'  累计位姿:         x={pose_x:7.3f}m   y={pose_y:7.3f}m   θ={pose_theta:7.3f}rad ({pose_theta*57.3:.1f}°)')
-                self.get_logger().info(f'  时间增量:         dt={dt:7.4f}s ({dt*1000:.1f}ms)')
                 self.get_logger().info(f'  估算速度:         vx={vx:7.3f}m/s  vy={vy:7.3f}m/s  wz={wz:7.3f}rad/s')
                 self.get_logger().info('─' * 80)
     

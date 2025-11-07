@@ -210,6 +210,15 @@ private:
         // 下位机发送的delta_x, delta_y, delta_theta是已经积分好的50ms位移增量
         // 不需要再乘以dt，直接使用
         
+        // 增量阈值过滤 - 过滤编码器噪声和静止时的微小漂移
+        const double MIN_DELTA_THRESHOLD = 0.001;  // 1mm阈值
+        const double MIN_ANGLE_THRESHOLD = 0.002;  // ~0.1度阈值
+        
+        // 只有当增量超过阈值时才进行累加
+        double filtered_delta_x = (std::abs(packet.disp_x) > MIN_DELTA_THRESHOLD) ? packet.disp_x : 0.0;
+        double filtered_delta_y = (std::abs(packet.disp_y) > MIN_DELTA_THRESHOLD) ? packet.disp_y : 0.0;
+        double filtered_delta_theta = (std::abs(packet.delta_theta) > MIN_ANGLE_THRESHOLD) ? packet.delta_theta : 0.0;
+        
         // 关键：将机器人坐标系的增量转换到世界坐标系（odom frame）
         // 使用当前角度进行旋转变换
         // 旋转矩阵: [cos -sin] [delta_x]
@@ -218,14 +227,14 @@ private:
         double cos_theta = std::cos(current_theta_);
         double sin_theta = std::sin(current_theta_);
         
-        // 机器人坐标系 -> 世界坐标系
-        double delta_x_world = packet.disp_x * cos_theta - packet.disp_y * sin_theta;
-        double delta_y_world = packet.disp_x * sin_theta + packet.disp_y * cos_theta;
+        // 机器人坐标系 -> 世界坐标系 (使用过滤后的增量)
+        double delta_x_world = filtered_delta_x * cos_theta - filtered_delta_y * sin_theta;
+        double delta_y_world = filtered_delta_x * sin_theta + filtered_delta_y * cos_theta;
         
         // 累加到世界坐标系位姿
         current_x_ += delta_x_world;
         current_y_ += delta_y_world;
-        current_theta_ += packet.delta_theta;
+        current_theta_ += filtered_delta_theta;
         
         // 角度归一化到 [-π, π]
         current_theta_ = std::atan2(std::sin(current_theta_), std::cos(current_theta_));
@@ -244,25 +253,25 @@ private:
         if (dt > 0.001f) {  // 避免除零
             current_vx_ = delta_x_world / dt;
             current_vy_ = delta_y_world / dt;
-            current_wz_ = packet.delta_theta / dt;
+            current_wz_ = filtered_delta_theta / dt;
         }
         
-        // 发布解析后的数据（用于调试）
+        // 发布解析后的数据（用于调试）- 使用过滤后的数据
         auto odom_data_msg = std_msgs::msg::Float32MultiArray();
         odom_data_msg.data = {
-            packet.disp_x,                      // [0] 机器人坐标系增量X
-            packet.disp_y,                      // [1] 机器人坐标系增量Y
-            packet.delta_theta,                 // [2] 角度增量
-            dt,                                 // [3] 时间增量
-            static_cast<float>(delta_x_world),  // [4] 世界坐标系增量X
-            static_cast<float>(delta_y_world),  // [5] 世界坐标系增量Y
-            static_cast<float>(current_x_),     // [6] 累计位姿X
-            static_cast<float>(current_y_),     // [7] 累计位姿Y
-            static_cast<float>(current_theta_), // [8] 累计位姿θ
-            packet.roll,                        // [9] IMU横滚角
-            packet.pitch,                       // [10] IMU俯仰角
-            packet.yaw,                         // [11] IMU航向角
-            packet.heading_diff                 // [12] 运动方向角
+            static_cast<float>(filtered_delta_x),     // [0] 机器人坐标系增量X (过滤后)
+            static_cast<float>(filtered_delta_y),     // [1] 机器人坐标系增量Y (过滤后)
+            static_cast<float>(filtered_delta_theta), // [2] 角度增量 (过滤后)
+            dt,                                       // [3] 时间增量
+            static_cast<float>(delta_x_world),        // [4] 世界坐标系增量X
+            static_cast<float>(delta_y_world),        // [5] 世界坐标系增量Y
+            static_cast<float>(current_x_),           // [6] 累计位姿X
+            static_cast<float>(current_y_),           // [7] 累计位姿Y
+            static_cast<float>(current_theta_),       // [8] 累计位姿θ
+            packet.roll,                              // [9] IMU横滚角
+            packet.pitch,                             // [10] IMU俯仰角
+            packet.yaw,                               // [11] IMU航向角
+            packet.heading_diff                       // [12] 运动方向角
         };
         odom_data_pub_->publish(odom_data_msg);
         
