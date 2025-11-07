@@ -145,6 +145,10 @@ install(PROGRAMS
   scripts/map_republisher.py
   scripts/initial_pose_setter.py
   scripts/relocalize.py
+  scripts/serial_monitor.py
+  scripts/odom_to_path.py
+  scripts/odom_data_viewer.py
+  scripts/test_velocity_pub.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

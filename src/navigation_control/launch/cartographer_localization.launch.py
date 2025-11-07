@@ -5,20 +5,21 @@ Cartographer 纯定位模式启动文件
 1. 加载已保存的 .pbstream 地图
 2. 使用 Cartographer 进行纯定位（不建图）
 3. 提供比 AMCL 更准确的激光定位
-4. 适合比赛场景：使用赛前建好的地图
+4. 发布 map→odom TF（Cartographer 自动处理）
+
+Cartographer vs AMCL 的区别:
+- Cartographer: 激光SLAM定位，精度高，自动全局定位，发布 map→odom TF
+- AMCL: 粒子滤波定位，需要初始位姿，需要手动设置
 
 使用方法:
-1. 先用 mapping.launch.py 建图并保存 .pbstream 文件
-2. 运行此文件进行定位和导航
-
-保存地图命令:
-ros2 service call /finish_trajectory cartographer_ros_msgs/srv/FinishTrajectory "{trajectory_id: 0}"
-ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: '/path/to/map.pbstream'}"
+1. 先用 mapping.launch.py 建图
+2. 保存地图: ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: '$(pwd)/my_map.pbstream'}"
+3. 运行此文件进行定位和导航
 """
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -50,7 +51,7 @@ def generate_launch_description():
     dev_board_port_arg = DeclareLaunchArgument(
         'dev_board_port',
         default_value='/dev/stm32',
-        description='Development board serial port (Micro USB)'
+        description='Development board serial port'
     )
     
     return LaunchDescription([
@@ -70,7 +71,15 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ RPLIDAR 节点 ============
+        # ============ TF: odom → base_link (静态，因为没有轮式里程计) ============
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='odom_to_base_link',
+            arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
+        ),
+        
+        # ============ 激光雷达 ============
         Node(
             package='sllidar_ros2',
             executable='sllidar_node',
@@ -85,39 +94,28 @@ def generate_launch_description():
                 'angle_compensate': True,
             }],
             remappings=[
-                ('/scan', '/scan_raw'),
+                ('/scan', '/scan_raw'),  # 发布到 /scan_raw
             ],
         ),
         
-        # ============ 激光扫描过滤器 ============
+        # ============ 激光扫描过滤器 (过滤机器人本体) ============
         Node(
             package='navigation_control',
             executable='scan_filter_node',
             name='scan_filter_node',
             output='screen',
             parameters=[{
-                'filter_angle_min': -2.42,
-                'filter_angle_max': 2.84,
-                'filter_range_max': 0.35,
+                'filter_angle_min': -2.42,  # -138.87°
+                'filter_angle_max': 2.84,   # 163.00°
+                'filter_range_max': 0.35,   # 只过滤 0.35m 以内
                 'input_topic': '/scan_raw',
-                'output_topic': '/scan',
-            }],
-        ),
-        
-        # ============ 轮式里程计接收节点 ============
-        Node(
-            package='navigation_control',
-            executable='wheel_odometry_receiver',
-            name='wheel_odometry_receiver',
-            output='screen',
-            parameters=[{
-                'publish_tf': True,
-                'odom_frame': 'odom',
-                'base_frame': 'base_link',
+                'output_topic': '/scan',    # 输出到标准 /scan
             }],
         ),
         
         # ============ Cartographer 纯定位节点 ============
+        # 功能: 加载 .pbstream 地图，进行激光定位
+        # 发布: map → odom TF (自动全局定位)
         Node(
             package='cartographer_ros',
             executable='cartographer_node',
@@ -130,14 +128,10 @@ def generate_launch_description():
                 '-configuration_directory', config_dir,
                 '-configuration_basename', 'cartographer_localization.lua',
                 '-load_state_filename', LaunchConfiguration('pbstream_file'),
-                '-start_trajectory_with_default_topics=false',  # 重要！
-            ],
-            remappings=[
-                ('/scan', '/scan'),  # 使用过滤后的扫描
             ],
         ),
         
-        # ============ Cartographer 占用栅格节点 ============
+        # ============ Cartographer 占用栅格节点 (发布地图) ============
         Node(
             package='cartographer_ros',
             executable='cartographer_occupancy_grid_node',
@@ -149,21 +143,7 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ TF 静态变换已由 robot.urdf 定义 ============
-        # base_link → laser 的变换在 URDF 中定义：
-        # - 位置: xyz="0.098 0.065 0.077"
-        # - 旋转: rpy="0 0 1.5708" (绕Z轴旋转90度对齐雷达坐标系)
-        
-        # ============ Cartographer 初始位姿辅助节点 ============
-        # 监听 RViz2 的 "2D Pose Estimate" 工具，辅助全局定位
-        Node(
-            package='navigation_control',
-            executable='cartographer_initial_pose_setter.py',
-            name='cartographer_initial_pose_setter',
-            output='screen',
-        ),
-        
-        # ============ 串口数据发布器 ============
+        # ============ 串口数据发布器 (接收 /cmd_vel) ============
         Node(
             package='navigation_control',
             executable='serial_data_publisher',
@@ -178,7 +158,7 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ 串口通信 ============
+        # ============ 串口通信 (发送到 STM32) ============
         Node(
             package='navigation_control',
             executable='serial_communication',

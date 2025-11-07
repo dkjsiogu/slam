@@ -137,6 +137,9 @@ private:
             connection_lost_count_ = 0;
             
             RCLCPP_INFO(this->get_logger(), "Serial port opened successfully!");
+            RCLCPP_INFO(this->get_logger(), "Port: %s, Baudrate: %d, 8N1", 
+                       serial_port_.c_str(), baudrate_);
+            RCLCPP_INFO(this->get_logger(), "Waiting for data from STM32...");
             
             return true;
             
@@ -195,41 +198,43 @@ private:
         }
         
         try {
-            // 检查是否有数据可读
-            if (serial_port_obj_.IsDataAvailable()) {
-                std::vector<uint8_t> buffer;
-                
-                // 读取所有可用数据
-                while (serial_port_obj_.IsDataAvailable()) {
-                    char byte;
+            std::vector<uint8_t> buffer;
+            
+            // 一次性读取所有可用数据
+            while (serial_port_obj_.IsDataAvailable()) {
+                char byte;
+                try {
                     serial_port_obj_.ReadByte(byte, timeout_ms_);
                     buffer.push_back(static_cast<uint8_t>(byte));
+                } catch (const ReadTimeout&) {
+                    // 超时正常,跳出循环
+                    break;
+                }
+            }
+            
+            if (!buffer.empty()) {
+                bytes_received_ += buffer.size();
+                packets_received_++;
+                
+                // 发布原始数据
+                auto rx_msg = std_msgs::msg::UInt8MultiArray();
+                rx_msg.data = buffer;
+                serial_rx_pub_->publish(rx_msg);
+                
+                // 发布十六进制字符串
+                std::stringstream hex_stream;
+                hex_stream << "RX: ";
+                for (uint8_t byte : buffer) {
+                    hex_stream << std::hex << std::setw(2) << std::setfill('0') 
+                              << static_cast<int>(byte) << " ";
                 }
                 
-                if (!buffer.empty()) {
-                    bytes_received_ += buffer.size();
-                    packets_received_++;
-                    
-                    // 发布原始数据
-                    auto rx_msg = std_msgs::msg::UInt8MultiArray();
-                    rx_msg.data = buffer;
-                    serial_rx_pub_->publish(rx_msg);
-                    
-                    // 发布十六进制字符串
-                    std::stringstream hex_stream;
-                    hex_stream << "RX: ";
-                    for (uint8_t byte : buffer) {
-                        hex_stream << std::hex << std::setw(2) << std::setfill('0') 
-                                  << static_cast<int>(byte) << " ";
-                    }
-                    
-                    auto hex_msg = std_msgs::msg::String();
-                    hex_msg.data = hex_stream.str();
-                    serial_rx_hex_pub_->publish(hex_msg);
-                    
-                    RCLCPP_DEBUG(this->get_logger(), "Received %zu bytes: %s", 
-                               buffer.size(), hex_msg.data.c_str());
-                }
+                auto hex_msg = std_msgs::msg::String();
+                hex_msg.data = hex_stream.str();
+                serial_rx_hex_pub_->publish(hex_msg);
+                
+                RCLCPP_INFO(this->get_logger(), "Received %zu bytes: %s", 
+                           buffer.size(), hex_msg.data.c_str());
             }
             
         } catch (const std::exception& e) {
@@ -261,11 +266,19 @@ private:
                       std::to_string(bytes_sent_) + " bytes), " +
                       "RX: " + std::to_string(packets_received_) + " packets (" + 
                       std::to_string(bytes_received_) + " bytes)";
+            
+            // 如果长时间没有接收到数据,给出提示
+            if (packets_received_ == 0) {
+                msg.data += " [WARNING: No data received from STM32]";
+            }
         } else {
             msg.data = "DISCONNECTED - Lost: " + std::to_string(connection_lost_count_) + " times";
         }
         
         connection_status_pub_->publish(msg);
+        
+        // 打印到控制台
+        RCLCPP_INFO(this->get_logger(), "%s", msg.data.c_str());
     }
     
     // 成员变量
