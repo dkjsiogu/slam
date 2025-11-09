@@ -252,13 +252,41 @@ private:
         float vy_robot = packet.chassis_vy;  // 左侧速度 (m/s)
         float wz = packet.chassis_w;         // 角速度 (rad/s)
         
+        // 3.5 计算IMU yaw角速度（更准确的旋转测量）
+        double imu_yaw = packet.yaw;  // IMU航向角 (rad)
+        double imu_angular_velocity = 0.0;
+        bool use_imu_rotation = false;
+        
+        if (last_imu_yaw_valid_) {
+            // 计算yaw角度变化（处理跨越±π的情况）
+            double delta_yaw = imu_yaw - last_imu_yaw_;
+            
+            // 角度归一化到 [-π, π]
+            while (delta_yaw > M_PI) delta_yaw -= 2.0 * M_PI;
+            while (delta_yaw < -M_PI) delta_yaw += 2.0 * M_PI;
+            
+            // 计算角速度
+            imu_angular_velocity = delta_yaw / dt;
+            
+            // 判断是否使用IMU角速度（当角速度足够大时）
+            const double IMU_ANGULAR_THRESHOLD = 0.01;  // 0.57°/s
+            if (std::abs(imu_angular_velocity) > IMU_ANGULAR_THRESHOLD) {
+                use_imu_rotation = true;
+                wz = imu_angular_velocity;  // 使用IMU角速度替代编码器角速度
+            }
+        }
+        
+        // 更新IMU历史
+        last_imu_yaw_ = imu_yaw;
+        last_imu_yaw_valid_ = true;
+        
         // 4. 速度死区过滤（过滤编码器噪声）
         const double VEL_THRESHOLD = 0.001;    // 1mm/s
         const double ANGULAR_THRESHOLD = 0.001; // ~0.06°/s
         
         if (std::abs(vx_robot) < VEL_THRESHOLD) vx_robot = 0.0f;
         if (std::abs(vy_robot) < VEL_THRESHOLD) vy_robot = 0.0f;
-        if (std::abs(wz) < ANGULAR_THRESHOLD) wz = 0.0f;
+        if (!use_imu_rotation && std::abs(wz) < ANGULAR_THRESHOLD) wz = 0.0f;
         
         // 5. 计算综合运动大小（用于静止判断）
         double translation_speed = std::sqrt(vx_robot*vx_robot + vy_robot*vy_robot);
@@ -274,25 +302,33 @@ private:
             current_wz_ *= 0.7;
             
             // 不积分位姿
-            publishDebugData(packet, 0.0, 0.0, 0.0, dt, true);
+            publishDebugData(packet, 0.0, 0.0, 0.0, dt, true, false, false);
             publishOdometry();
             if (publish_tf_) publishTransform();
             return;
         }
         
-        // 6. 机器人坐标系速度 -> 位移增量（简单矩形积分）
-        double dx_robot = vx_robot * dt;
-        double dy_robot = vy_robot * dt;
+        // 6. 判断是否为纯旋转（yaw有变化但xy不应累积）
+        const double PURE_ROTATION_VEL_THRESHOLD = 0.02;  // 2cm/s 平移速度阈值
+        const double PURE_ROTATION_ANGULAR_THRESHOLD = 0.05;  // ~2.9°/s 角速度阈值
+        
+        // 使用之前计算的 translation_speed（避免重复定义）
+        bool is_pure_rotation = (std::abs(wz) > PURE_ROTATION_ANGULAR_THRESHOLD) && 
+                                (translation_speed < PURE_ROTATION_VEL_THRESHOLD);
+        
+        // 7. 机器人坐标系速度 -> 位移增量（简单矩形积分）
+        double dx_robot = is_pure_rotation ? 0.0 : vx_robot * dt;  // 纯旋转时不累积xy
+        double dy_robot = is_pure_rotation ? 0.0 : vy_robot * dt;  // 纯旋转时不累积xy
         double dtheta = wz * dt;
         
-        // 7. 转换到世界坐标系（使用当前角度）
+        // 8. 转换到世界坐标系（使用当前角度）
         double cos_theta = std::cos(current_theta_);
         double sin_theta = std::sin(current_theta_);
         
         double dx_world = dx_robot * cos_theta - dy_robot * sin_theta;
         double dy_world = dx_robot * sin_theta + dy_robot * cos_theta;
         
-        // 8. 累加位姿
+        // 9. 累加位姿
         current_x_ += dx_world;
         current_y_ += dy_world;
         current_theta_ += dtheta;
@@ -300,36 +336,43 @@ private:
         // 角度归一化到 [-π, π]
         current_theta_ = std::atan2(std::sin(current_theta_), std::cos(current_theta_));
         
-        // 9. 更新世界坐标系速度（用于发布到 /odom）
+        // 10. 更新速度
+        // 世界坐标系速度（用于调试显示）
         current_vx_ = dx_world / dt;
         current_vy_ = dy_world / dt;
         current_wz_ = dtheta / dt;
         
-        // 10. 发布调试数据
-        publishDebugData(packet, dx_world, dy_world, dtheta, dt, false);
+        // 机器人坐标系速度（用于发布Odometry消息）
+        current_vx_robot_ = vx_robot;
+        current_vy_robot_ = vy_robot;
+        current_wz_robot_ = wz;
         
-        // 11. 发布里程计消息
+        // 11. 发布调试数据
+        publishDebugData(packet, dx_world, dy_world, dtheta, dt, false, is_pure_rotation, use_imu_rotation);
+        
+        // 12. 发布里程计消息
         publishOdometry();
         
-        // 12. 发布TF变换
+        // 13. 发布TF变换
         if (publish_tf_) {
             publishTransform();
         }
         
         // 调试日志（详细版）
         RCLCPP_DEBUG(this->get_logger(), 
-                    "速度: vx=%.3f vy=%.3f w=%.3f | dt=%.4fs | "
-                    "增量: dx=%.4f dy=%.4f dθ=%.4f | "
+                    "速度: vx=%.3f vy=%.3f w=%.3f%s | dt=%.4fs | "
+                    "增量: dx=%.4f dy=%.4f dθ=%.4f%s | "
                     "位姿: x=%.3f y=%.3f θ=%.3f",
-                    vx_robot, vy_robot, wz, dt,
-                    dx_world, dy_world, dtheta,
+                    vx_robot, vy_robot, wz, use_imu_rotation ? "(IMU)" : "", dt,
+                    dx_world, dy_world, dtheta, is_pure_rotation ? " [纯旋转-不累积XY]" : "",
                     current_x_, current_y_, current_theta_);
     }
     
-    // 发布调试数据（新版：适配速度积分架构）
+    // 发布调试数据（新版：适配速度积分架构 + IMU融合）
     void publishDebugData(const VisionSendPacket& packet, 
                          double dx_world, double dy_world, double dtheta, 
-                         double dt, bool is_stationary)
+                         double dt, bool is_stationary, 
+                         bool is_pure_rotation = false, bool use_imu_rotation = false)
     {
         auto odom_data_msg = std_msgs::msg::Float32MultiArray();
         odom_data_msg.data = {
@@ -374,26 +417,32 @@ private:
         odom_msg.pose.pose.orientation.z = q.z();
         odom_msg.pose.pose.orientation.w = q.w();
         
-        // 速度 (世界坐标系)
-        odom_msg.twist.twist.linear.x = current_vx_;
-        odom_msg.twist.twist.linear.y = current_vy_;
+        // 速度 (机器人坐标系 - 符合 nav_msgs/Odometry 标准)
+        // REP 105: twist 应该在 child_frame_id (base_link) 坐标系中
+        odom_msg.twist.twist.linear.x = current_vx_robot_;
+        odom_msg.twist.twist.linear.y = current_vy_robot_;
         odom_msg.twist.twist.linear.z = 0.0;
         odom_msg.twist.twist.angular.x = 0.0;
         odom_msg.twist.twist.angular.y = 0.0;
-        odom_msg.twist.twist.angular.z = current_wz_;
+        odom_msg.twist.twist.angular.z = current_wz_robot_;
         
-        // 协方差矩阵 (根据实际精度调整)
+        // 协方差矩阵 (根据实测精度调整)
         // 对角线: x, y, z, roll, pitch, yaw
-        odom_msg.pose.covariance[0] = 0.01;   // x variance
-        odom_msg.pose.covariance[7] = 0.01;   // y variance
-        odom_msg.pose.covariance[14] = 1e6;   // z variance (固定为0)
-        odom_msg.pose.covariance[21] = 1e6;   // roll variance (固定为0)
-        odom_msg.pose.covariance[28] = 1e6;   // pitch variance (固定为0)
-        odom_msg.pose.covariance[35] = 0.05;  // yaw variance
+        // 实测：xy 精度 ~1cm，下位机速度很准
+        odom_msg.pose.covariance[0] = 0.0001;   // x variance (1cm)² = 0.0001 m²
+        odom_msg.pose.covariance[7] = 0.0001;   // y variance (1cm)² = 0.0001 m²
+        odom_msg.pose.covariance[14] = 1e6;     // z variance (固定为0，不使用)
+        odom_msg.pose.covariance[21] = 1e6;     // roll variance (固定为0，不使用)
+        odom_msg.pose.covariance[28] = 1e6;     // pitch variance (固定为0，不使用)
+        odom_msg.pose.covariance[35] = 0.1;     // yaw variance (保守估计 ~18°)
         
-        odom_msg.twist.covariance[0] = 0.01;   // vx variance
-        odom_msg.twist.covariance[7] = 0.01;   // vy variance
-        odom_msg.twist.covariance[35] = 0.05;  // wz variance
+        // 速度协方差（下位机发送很准确）
+        odom_msg.twist.covariance[0] = 0.0001;   // vx variance (很准)
+        odom_msg.twist.covariance[7] = 0.0001;   // vy variance (很准)
+        odom_msg.twist.covariance[14] = 1e6;     // vz (不使用)
+        odom_msg.twist.covariance[21] = 1e6;     // wx (不使用)
+        odom_msg.twist.covariance[28] = 1e6;     // wy (不使用)
+        odom_msg.twist.covariance[35] = 0.01;    // wz variance (角速度，使用IMU融合后较准)
         
         odom_pub_->publish(odom_msg);
     }
@@ -471,13 +520,22 @@ private:
     double current_y_{0.0};
     double current_theta_{0.0};
     
-    // 当前速度 (世界坐标系)
+    // 当前速度 (世界坐标系 - 用于调试)
     double current_vx_{0.0};
     double current_vy_{0.0};
     double current_wz_{0.0};
     
+    // 当前速度 (机器人坐标系 - 用于发布Odometry)
+    double current_vx_robot_{0.0};
+    double current_vy_robot_{0.0};
+    double current_wz_robot_{0.0};
+    
     // 时间基准 (ROS时间)
     rclcpp::Time last_update_time_{0, 0, RCL_ROS_TIME};
+    
+    // IMU yaw角历史（用于计算角速度）
+    double last_imu_yaw_{0.0};
+    bool last_imu_yaw_valid_{false};
     
     // 统计
     long packets_received_{0};

@@ -155,6 +155,9 @@ def generate_launch_description():
                 '-configuration_basename', 'cartographer_localization.lua',
                 '-load_state_filename', LaunchConfiguration('pbstream_file'),
             ],
+            remappings=[
+                ('/odom', '/odom'),  # 订阅轮式里程计数据（融合定位）
+            ],
         ),
         
         # ============ Cartographer 占用栅格节点 (发布地图) ============
@@ -167,6 +170,28 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'resolution': 0.05,
             }],
+        ),
+        
+        # ============ 地图重发布节点 (解决 RViz2 QoS 问题) ============
+        Node(
+            package='navigation_control',
+            executable='map_republisher.py',
+            name='map_republisher',
+            output='screen',
+        ),
+        
+        # ============ 简单导航控制器 (路径规划 + 速度计算) ============
+        Node(
+            package='navigation_control',
+            executable='simple_goal_controller.py',
+            name='simple_goal_controller',
+            output='screen',
+            parameters=[{
+                'max_linear_vel': 0.5,      # 最大线速度
+                'max_angular_vel': 1.0,     # 最大角速度
+                'goal_tolerance': 0.1,      # 到达目标的容差 (10cm)
+                'lookahead_distance': 0.3,  # 前瞻距离
+            }]
         ),
         
         # ============ 全向轮控制器 (cmd_vel -> 下位机协议) ============

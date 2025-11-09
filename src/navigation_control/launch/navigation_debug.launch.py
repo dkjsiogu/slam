@@ -184,7 +184,7 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ AMCL 定位 ============
+        # ============ AMCL 定位 (已优化适配高精度轮式里程计) ============
         Node(
             package='nav2_amcl',
             executable='amcl',
@@ -195,28 +195,42 @@ def generate_launch_description():
                 'global_frame_id': 'map',
                 'odom_frame_id': 'odom',
                 'base_frame_id': 'base_link',
-                'scan_topic': '/scan',  # 使用过滤后的扫描 (已经替换)
-                # 粒子滤波参数
-                'min_particles': 500,
-                'max_particles': 2000,
-                'update_min_d': 0.2,
-                'update_min_a': 0.5,
-                # 增加全局定位能力
-                'recovery_alpha_slow': 0.001,
-                'recovery_alpha_fast': 0.1,
+                'scan_topic': '/scan',  # 使用过滤后的扫描
+                
+                # 粒子滤波参数（高精度里程计可减少粒子数）
+                'min_particles': 200,      # 降低（因为里程计准确，不需要太多粒子）
+                'max_particles': 1000,     # 降低（节省CPU）
+                'update_min_d': 0.1,       # 降低（里程计准确，可以更频繁更新）
+                'update_min_a': 0.3,       # 降低（检测小角度变化）
+                
+                # 里程计模型参数（关键：告诉AMCL里程计很准）
+                'odom_model_type': 'omni',           # 全向轮模型
+                'odom_alpha1': 0.001,                # 旋转时的旋转误差（很小，因为有IMU）
+                'odom_alpha2': 0.001,                # 平移时的旋转误差（很小）
+                'odom_alpha3': 0.001,                # 平移时的平移误差（1cm精度）
+                'odom_alpha4': 0.001,                # 旋转时的平移误差（很小）
+                'odom_alpha5': 0.001,                # 侧向平移误差（全向轮特有）
+                
+                # 恢复参数（降低，因为里程计可靠）
+                'recovery_alpha_slow': 0.0,          # 禁用（里程计准确，不需要恢复机制）
+                'recovery_alpha_fast': 0.0,          # 禁用
+                
                 # 激光模型参数
                 'laser_max_range': 12.0,
                 'laser_min_range': 0.15,
                 'max_beams': 60,
                 'laser_model_type': 'likelihood_field',
-                # 初始位姿分散
+                'laser_likelihood_max_dist': 2.0,
+                
+                # 初始位姿
                 'set_initial_pose': False,
                 'initial_pose.x': 0.0,
                 'initial_pose.y': 0.0,
                 'initial_pose.yaw': 0.0,
-                # TF 发布
+                
+                # TF 发布（里程计准确，可以放宽容差）
                 'tf_broadcast': True,
-                'transform_tolerance': 1.0,
+                'transform_tolerance': 0.5,          # 降低（从1.0降到0.5）
             }],
         ),
         

@@ -141,6 +141,9 @@ def generate_launch_description():
                 '-configuration_directory', config_dir,
                 '-configuration_basename', 'cartographer_2d.lua'
             ],
+            remappings=[
+                ('/odom', '/odom'),  # 订阅轮式里程计数据
+            ],
         ),
         
         # Cartographer占用栅格节点

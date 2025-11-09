@@ -75,6 +75,9 @@ struct __attribute__((packed)) OmniWheelCmd {
     float vx;              // 前后速度 (m/s)
     float vy;              // 左右速度 (m/s)
     float wz;              // 旋转速度 (rad/s)
+    float flog;
+    float dx;
+    float dy;
     uint32_t timestamp;    // 时间戳 (ms)
     uint16_t checksum;     // CRC16校验
     
@@ -119,6 +122,11 @@ public:
             "/cmd_vel", 10,
             std::bind(&SerialDataPublisher::cmdVelCallback, this, std::placeholders::_1));
         
+        // 订阅颜色跟踪结果 (get-toy 发布的)
+        color_tracking_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/color_tracking/result", 10,
+            std::bind(&SerialDataPublisher::colorTrackingCallback, this, std::placeholders::_1));
+        
         // 发布串口数据
         serial_data_pub_ = this->create_publisher<std_msgs::msg::UInt8MultiArray>(
             "serial_tx_data", 10);
@@ -140,6 +148,29 @@ public:
     }
 
 private:
+    // 颜色跟踪结果回调
+    void colorTrackingCallback(const std_msgs::msg::String::SharedPtr msg)
+    {
+        // 解析 get-toy 发布的字符串: "valid=1 rad=1.2345 dy=50"
+        std::istringstream iss(msg->data);
+        std::string token;
+        
+        while (iss >> token) {
+            if (token.find("valid=") == 0) {
+                tracking_valid_ = (std::stoi(token.substr(6)) == 1);
+            }
+            else if (token.find("rad=") == 0) {
+                tracking_rad_ = std::stod(token.substr(4));
+            }
+            else if (token.find("dy=") == 0) {
+                tracking_dy_ = std::stoi(token.substr(3));
+            }
+        }
+        
+        RCLCPP_DEBUG(this->get_logger(), "颜色跟踪: valid=%d rad=%.3f dy=%d", 
+                    tracking_valid_, tracking_rad_, tracking_dy_);
+    }
+    
     // 速度命令回调
     void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
     {
@@ -172,6 +203,12 @@ private:
         packet.vx = static_cast<float>(vx);
         packet.vy = static_cast<float>(vy);
         packet.wz = static_cast<float>(wz);
+        
+        // 填充颜色跟踪数据
+        packet.flog = tracking_valid_ ? 1.0f : 0.0f;  // 目标是否有效
+        packet.dx = static_cast<float>(tracking_rad_);  // 偏转角度 (rad)
+        packet.dy = static_cast<float>(tracking_dy_);   // 垂直偏移 (pixels)
+        
         packet.timestamp = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()
@@ -219,6 +256,7 @@ private:
     
     // 成员变量
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr color_tracking_sub_;
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr serial_data_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr serial_hex_pub_;
     rclcpp::TimerBase::SharedPtr timeout_timer_;
@@ -234,6 +272,11 @@ private:
     double smoothed_wz_{0.0};
     
     rclcpp::Time last_cmd_time_;
+    
+    // 颜色跟踪数据
+    bool tracking_valid_{false};
+    double tracking_rad_{0.0};
+    int tracking_dy_{0};
 };
 
 int main(int argc, char** argv)
