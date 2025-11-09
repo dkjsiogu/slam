@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Cartographer 纯定位模式启动文件
+Cartographer 纯定位模式启动文件 (已集成轮式里程计)
 功能:
-1. 加载已保存的 .pbstream 地图
-2. 使用 Cartographer 进行纯定位（不建图）
-3. 提供比 AMCL 更准确的激光定位
-4. 发布 map→odom TF（Cartographer 自动处理）
+1. RPLIDAR驱动 + 扫描过滤
+2. 轮式里程计 (发布 /odom 和 TF: odom->base_link)
+3. 加载已保存的 .pbstream 地图
+4. Cartographer 纯定位模式（不建图，只定位）
+5. 串口通信 (全向轮控制)
+6. RViz2可视化
+
+TF树: map -> odom (Cartographer) -> base_link (wheel_odom) -> laser (URDF)
 
 Cartographer vs AMCL 的区别:
-- Cartographer: 激光SLAM定位，精度高，自动全局定位，发布 map→odom TF
+- Cartographer: 激光SLAM定位，精度高，自动全局定位
 - AMCL: 粒子滤波定位，需要初始位姿，需要手动设置
 
 使用方法:
-1. 先用 mapping.launch.py 建图
-2. 保存地图: ros2 service call /write_state cartographer_ros_msgs/srv/WriteState "{filename: '$(pwd)/my_map.pbstream'}"
-3. 运行此文件进行定位和导航
+1. 先用 mapping.launch.py 建图并保存 .pbstream
+2. 运行此文件进行定位和导航:
+   ros2 launch navigation_control cartographer_localization.launch.py
 """
 
 from launch import LaunchDescription
@@ -71,12 +75,33 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ TF: odom → base_link (静态，因为没有轮式里程计) ============
+        # ============ 轮式里程计节点 (发布 /odom 和 TF: odom->base_link) ============
         Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='odom_to_base_link',
-            arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
+            package='navigation_control',
+            executable='wheel_odometry_node',
+            name='wheel_odometry_node',
+            output='screen',
+            parameters=[{
+                'odom_frame': 'odom',
+                'base_frame': 'base_link',
+                'publish_tf': True,
+                'enable_crc_check': False,  # 定位时关闭CRC检查以提高容错性
+            }],
+        ),
+        
+        # ============ 串口通信 (双向通信) ============
+        Node(
+            package='navigation_control',
+            executable='serial_communication',
+            name='serial_communication',
+            output='screen',
+            parameters=[{
+                'serial_port': LaunchConfiguration('dev_board_port'),
+                'baudrate': 115200,
+                'timeout_ms': 100,
+                'auto_reconnect': True,
+                'reconnect_interval': 5.0,
+            }],
         ),
         
         # ============ 激光雷达 ============
@@ -99,14 +124,15 @@ def generate_launch_description():
         ),
         
         # ============ 激光扫描过滤器 (过滤机器人本体) ============
+        # 雷达倒装(X朝后Y朝右)，需过滤机器人后方本体
         Node(
             package='navigation_control',
             executable='scan_filter_node',
             name='scan_filter_node',
             output='screen',
             parameters=[{
-                'filter_angle_min': -2.42,  # -138.87°
-                'filter_angle_max': 2.84,   # 163.00°
+                'filter_angle_min': -2.30,  # -132° (左后角，雷达坐标系)
+                'filter_angle_max': 2.69,   # 154° (右后角，雷达坐标系)
                 'filter_range_max': 0.35,   # 只过滤 0.35m 以内
                 'input_topic': '/scan_raw',
                 'output_topic': '/scan',    # 输出到标准 /scan
@@ -143,7 +169,7 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ 串口数据发布器 (接收 /cmd_vel) ============
+        # ============ 全向轮控制器 (cmd_vel -> 下位机协议) ============
         Node(
             package='navigation_control',
             executable='serial_data_publisher',
@@ -155,21 +181,6 @@ def generate_launch_description():
                 'max_wz': 2.0,
                 'velocity_timeout': 1.0,
                 'smooth_factor': 0.7,
-            }],
-        ),
-        
-        # ============ 串口通信 (发送到 STM32) ============
-        Node(
-            package='navigation_control',
-            executable='serial_communication',
-            name='serial_communication',
-            output='screen',
-            parameters=[{
-                'serial_port': LaunchConfiguration('dev_board_port'),
-                'baudrate': 115200,
-                'timeout_ms': 100,
-                'auto_reconnect': True,
-                'reconnect_interval': 5.0,
             }],
         ),
         

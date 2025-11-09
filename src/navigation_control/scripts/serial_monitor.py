@@ -59,36 +59,48 @@ class SerialMonitor(Node):
             self.get_logger().info(f'[原始数据] {hex_str}...')
     
     def odom_data_callback(self, msg):
-        """显示解析后的里程计数据"""
-        if len(msg.data) >= 9:
-            # 机器人坐标系增量
-            delta_x_robot = msg.data[0]
-            delta_y_robot = msg.data[1]
-            delta_theta = msg.data[2]
+        """显示解析后的里程计数据（新版：基于速度积分）"""
+        if len(msg.data) >= 16:
+            # 机器人坐标系速度（下位机实时发送）
+            vx_robot = msg.data[0]
+            vy_robot = msg.data[1]
+            wz_robot = msg.data[2]
             dt = msg.data[3]
             
-            # 世界坐标系增量
-            delta_x_world = msg.data[4]
-            delta_y_world = msg.data[5]
+            # 世界坐标系位移增量（上位机积分结果）
+            dx_world = msg.data[4]
+            dy_world = msg.data[5]
             
             # 累计位姿
             pose_x = msg.data[6]
             pose_y = msg.data[7]
             pose_theta = msg.data[8]
             
-            # 计算瞬时速度
-            if dt > 0.001:
-                vx = delta_x_world / dt
-                vy = delta_y_world / dt
-                wz = delta_theta / dt
-                
-                self.get_logger().info('─' * 80)
-                self.get_logger().info(f'[下位机里程计数据 - 带阈值过滤]')
-                self.get_logger().info(f'  机器人坐标系增量: dx={delta_x_robot:7.4f}m  dy={delta_y_robot:7.4f}m  dθ={delta_theta:7.4f}rad (已过滤<1mm)')
-                self.get_logger().info(f'  世界坐标系增量:   dx={delta_x_world:7.4f}m  dy={delta_y_world:7.4f}m')
-                self.get_logger().info(f'  累计位姿:         x={pose_x:7.3f}m   y={pose_y:7.3f}m   θ={pose_theta:7.3f}rad ({pose_theta*57.3:.1f}°)')
-                self.get_logger().info(f'  估算速度:         vx={vx:7.3f}m/s  vy={vy:7.3f}m/s  wz={wz:7.3f}rad/s')
-                self.get_logger().info('─' * 80)
+            # IMU数据
+            roll = msg.data[9]
+            pitch = msg.data[10]
+            yaw = msg.data[11]
+            
+            # 角度增量
+            dtheta = msg.data[12]
+            
+            # 世界坐标系速度（转换后）
+            vx_world = msg.data[13]
+            vy_world = msg.data[14]
+            
+            # 静止标志
+            is_stationary = (msg.data[15] > 0.5)
+            
+            # 显示数据
+            self.get_logger().info('─' * 80)
+            self.get_logger().info(f'[里程计数据 - ROS时间戳积分] {"🛑 静止" if is_stationary else "▶️ 运动"}')
+            self.get_logger().info(f'  机器人坐标系速度: vx={vx_robot:7.3f}m/s  vy={vy_robot:7.3f}m/s  w={wz_robot:7.3f}rad/s')
+            self.get_logger().info(f'  时间增量:         dt={dt:7.4f}s ({dt*1000:.1f}ms)')
+            self.get_logger().info(f'  世界坐标系增量:   dx={dx_world:7.4f}m  dy={dy_world:7.4f}m  dθ={dtheta:7.4f}rad')
+            self.get_logger().info(f'  世界坐标系速度:   vx={vx_world:7.3f}m/s  vy={vy_world:7.3f}m/s')
+            self.get_logger().info(f'  累计位姿:         x={pose_x:7.3f}m   y={pose_y:7.3f}m   θ={pose_theta:7.3f}rad ({pose_theta*57.3:.1f}°)')
+            self.get_logger().info(f'  IMU姿态:          Roll={roll*57.3:.1f}°  Pitch={pitch*57.3:.1f}°  Yaw={yaw*57.3:.1f}°')
+            self.get_logger().info('─' * 80)
     
     def print_statistics(self):
         """定期打印统计信息"""

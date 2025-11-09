@@ -149,6 +149,7 @@ install(PROGRAMS
   scripts/odom_to_path.py
   scripts/odom_data_viewer.py
   scripts/test_velocity_pub.py
+  scripts/keyboard_teleop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

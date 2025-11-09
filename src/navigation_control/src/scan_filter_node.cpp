@@ -18,8 +18,9 @@ public:
     ScanFilterNode() : Node("scan_filter_node")
     {
         // 声明参数 - 角度+距离组合过滤
-        this->declare_parameter<double>("filter_angle_min", -2.42);  // -138.87° in radians
-        this->declare_parameter<double>("filter_angle_max", 2.84);   // 163.00° in radians
+        // 雷达倒装(X朝后Y朝右)，过滤机器人后方本体
+        this->declare_parameter<double>("filter_angle_min", -2.30);  // -132° (左后角)
+        this->declare_parameter<double>("filter_angle_max", 2.69);   // 154° (右后角)
         this->declare_parameter<double>("filter_range_max", 0.35);   // 只过滤此距离内的点
         this->declare_parameter<std::string>("input_topic", "/scan");
         this->declare_parameter<std::string>("output_topic", "/scan_filtered");

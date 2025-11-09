@@ -34,7 +34,7 @@ public:
     SerialCommunication() : Node("serial_communication")
     {
         // 声明参数
-        this->declare_parameter("serial_port", "/dev/ttyUSB1");  // Micro USB通常是ttyUSB1
+        this->declare_parameter("serial_port", "/dev/ttyACM0");  // Micro USB通常是ttyACM0
         this->declare_parameter("baudrate", 115200);
         this->declare_parameter("timeout_ms", 100);
         this->declare_parameter("auto_reconnect", true);
@@ -233,8 +233,9 @@ private:
                 hex_msg.data = hex_stream.str();
                 serial_rx_hex_pub_->publish(hex_msg);
                 
-                RCLCPP_INFO(this->get_logger(), "Received %zu bytes: %s", 
-                           buffer.size(), hex_msg.data.c_str());
+                // 改为DEBUG级别，避免日志刷屏
+                RCLCPP_DEBUG(this->get_logger(), "Received %zu bytes: %s", 
+                            buffer.size(), hex_msg.data.c_str());
             }
             
         } catch (const std::exception& e) {

@@ -1,12 +1,13 @@
 /**
  * @file wheel_odometry_node.cpp
- * @brief 轮式里程计节点 - 接收下位机增量数据并积分到世界坐标系
+ * @brief 轮式里程计节点 - 接收下位机速度数据并积分到世界坐标系
  * 
  * 功能:
- * 1. 订阅串口接收的里程计增量数据 (已经是积分后的位移，不是瞬时速度)
- * 2. 将机器人坐标系的位移增量转换并累加到世界坐标系 (odom坐标系)
- * 3. 发布 nav_msgs/Odometry 消息到 /odom 话题
- * 4. 发布 TF 变换: odom -> base_link
+ * 1. 订阅串口接收的底盘实时速度数据 (chassis_vx/vy/w)
+ * 2. 使用ROS时间戳计算dt，对速度进行积分
+ * 3. 将机器人坐标系的速度转换到世界坐标系并累加位姿
+ * 4. 发布 nav_msgs/Odometry 消息到 /odom 话题
+ * 5. 发布 TF 变换: odom -> base_link
  * 
  * 下位机数据包格式（与 master_process.h 中 Vision_Send_s 对应）:
  * - header: 0x5A (1字节)
@@ -14,17 +15,20 @@
  * - roll: float (4字节) - IMU横滚角
  * - pitch: float (4字节) - IMU俯仰角
  * - yaw: float (4字节) - IMU航向角
- * - delta_theta: float (4字节) - 每周期角度增量 (rad)
- * - disp_x: float (4字节) - 每周期X轴位移增量 (m, 机器人坐标系)
- * - disp_y: float (4字节) - 每周期Y轴位移增量 (m, 机器人坐标系)
- * - heading_diff: float (4字节) - 运动方向相对初始坐标系的角度 (rad)
+ * - delta_theta: float (4字节) - 角度增量 (rad) [遗留字段，不再使用]
+ * - disp_x: float (4字节) - 位移增量X [遗留字段，不再使用]
+ * - disp_y: float (4字节) - 位移增量Y [遗留字段，不再使用]
+ * - heading_diff: float (4字节) - 运动方向角 [遗留字段]
+ * - chassis_vx: float (4字节) - ⚠️ 底盘实时速度X (m/s, 机器人坐标系前进方向)
+ * - chassis_vy: float (4字节) - ⚠️ 底盘实时速度Y (m/s, 机器人坐标系左侧方向)
+ * - chassis_w: float (4字节) - ⚠️ 底盘角速度 (rad/s, 逆时针为正)
  * - game_time: uint16_t (2字节) - 比赛时间 (s)
- * - timestamp: uint32_t (4字节) - 板载时间戳 (ms)
+ * - timestamp: uint32_t (4字节) - 板载时间戳 (ms) [不使用，用ROS时间]
  * - checksum: uint16_t (2字节) - CRC16校验
- * 总计: 38字节
+ * 总计: 50字节 (更新于2025-01-08)
  * 
- * 注意: 下位机发送的 disp_x/disp_y/delta_theta 是经过50ms窗口积分的位移量，
- *      不是瞬时速度乘以dt，而是直接的位移增量
+ * ⚠️ 架构变更 (2025-01-08):
+ *    下位机现在发送实时速度而非50ms积分，上位机负责用ROS时间戳做积分
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -80,7 +84,7 @@ uint16_t Get_CRC16_Check_Sum(const uint8_t *pchMessage, uint32_t dwLength, uint1
 }
 
 // 里程计数据包结构 - 与下位机 Vision_Send_s 完全对应
-// 定义见 master_process.h
+// 定义见 master_process.h (2025-01-08 更新: 新增底盘速度字段)
 struct __attribute__((packed)) VisionSendPacket {
     uint8_t header;              // 0x5A
     uint8_t detect_color : 1;    // 0-red 1-blue
@@ -96,10 +100,13 @@ struct __attribute__((packed)) VisionSendPacket {
     float disp_x;                // 位移增量X (m, 4字节)
     float disp_y;                // 位移增量Y (m, 4字节)
     float heading_diff;          // 运动方向角 (rad, 4字节)
+    float chassis_vx;            // ⚠️ 新增: 底盘实时速度X (m/s, 4字节)
+    float chassis_vy;            // ⚠️ 新增: 底盘实时速度Y (m/s, 4字节)
+    float chassis_w;             // ⚠️ 新增: 底盘角速度 (rad/s, 4字节)
     uint16_t game_time;          // 比赛时间 (s, 2字节)
     uint32_t timestamp;          // 时间戳 (ms, 4字节)
     uint16_t checksum;           // CRC16校验 (2字节)
-    // 总计: 1+1+4+4+4+4+4+4+4+2+4+2 = 38字节
+    // 总计: 1+1+4*10+2+4+2 = 50字节
     
     // 验证CRC16
     bool verifyCRC() const {
@@ -207,90 +214,143 @@ private:
     // 处理里程计增量数据
     void processOdometryDelta(const VisionSendPacket& packet)
     {
-        // 下位机发送的delta_x, delta_y, delta_theta是已经积分好的50ms位移增量
-        // 不需要再乘以dt，直接使用
+        // ===== 架构变更：现在使用实时速度积分，而非预积分位移 =====
+        // 使用 chassis_vx/vy/w (机器人坐标系速度) + ROS时间戳计算dt
         
-        // 增量阈值过滤 - 过滤编码器噪声和静止时的微小漂移
-        const double MIN_DELTA_THRESHOLD = 0.001;  // 1mm阈值
-        const double MIN_ANGLE_THRESHOLD = 0.002;  // ~0.1度阈值
+        // 1. 计算时间增量 (使用ROS时间，忽略下位机timestamp)
+        rclcpp::Time current_time = this->now();
         
-        // 只有当增量超过阈值时才进行累加
-        double filtered_delta_x = (std::abs(packet.disp_x) > MIN_DELTA_THRESHOLD) ? packet.disp_x : 0.0;
-        double filtered_delta_y = (std::abs(packet.disp_y) > MIN_DELTA_THRESHOLD) ? packet.disp_y : 0.0;
-        double filtered_delta_theta = (std::abs(packet.delta_theta) > MIN_ANGLE_THRESHOLD) ? packet.delta_theta : 0.0;
+        if (!last_update_time_.nanoseconds()) {
+            // 第一帧：只初始化时间，不积分
+            last_update_time_ = current_time;
+            RCLCPP_INFO(this->get_logger(), "里程计初始化：等待下一帧开始积分");
+            return;
+        }
         
-        // 关键：将机器人坐标系的增量转换到世界坐标系（odom frame）
-        // 使用当前角度进行旋转变换
-        // 旋转矩阵: [cos -sin] [delta_x]
-        //          [sin  cos] [delta_y]
+        double dt = (current_time - last_update_time_).seconds();
+        last_update_time_ = current_time;
         
+        // 2. dt 保护
+        const double MIN_DT = 0.0001;  // 0.1ms
+        const double MAX_DT = 0.5;     // 500ms
+        
+        if (dt < MIN_DT) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "dt过小 (%.6fs)，跳过本帧", dt);
+            return;
+        }
+        
+        if (dt > MAX_DT) {
+            RCLCPP_WARN(this->get_logger(), 
+                       "dt过大 (%.3fs)，可能丢包/暂停，重置时间基准", dt);
+            // 不积分，只更新时间（已在上面更新）
+            return;
+        }
+        
+        // 3. 读取机器人坐标系速度（下位机发送的实时值）
+        float vx_robot = packet.chassis_vx;  // 前进速度 (m/s)
+        float vy_robot = packet.chassis_vy;  // 左侧速度 (m/s)
+        float wz = packet.chassis_w;         // 角速度 (rad/s)
+        
+        // 4. 速度死区过滤（过滤编码器噪声）
+        const double VEL_THRESHOLD = 0.001;    // 1mm/s
+        const double ANGULAR_THRESHOLD = 0.001; // ~0.06°/s
+        
+        if (std::abs(vx_robot) < VEL_THRESHOLD) vx_robot = 0.0f;
+        if (std::abs(vy_robot) < VEL_THRESHOLD) vy_robot = 0.0f;
+        if (std::abs(wz) < ANGULAR_THRESHOLD) wz = 0.0f;
+        
+        // 5. 计算综合运动大小（用于静止判断）
+        double translation_speed = std::sqrt(vx_robot*vx_robot + vy_robot*vy_robot);
+        double rotation_speed = std::abs(wz) * 0.15;  // 乘以特征半径转为线速度等效
+        double total_motion_speed = translation_speed + rotation_speed;
+        
+        const double MOTION_THRESHOLD = 0.002; // 2mm/s 综合运动阈值
+        
+        if (total_motion_speed < MOTION_THRESHOLD) {
+            // 静止：速度指数衰减而非突变为0
+            current_vx_ *= 0.7;
+            current_vy_ *= 0.7;
+            current_wz_ *= 0.7;
+            
+            // 不积分位姿
+            publishDebugData(packet, 0.0, 0.0, 0.0, dt, true);
+            publishOdometry();
+            if (publish_tf_) publishTransform();
+            return;
+        }
+        
+        // 6. 机器人坐标系速度 -> 位移增量（简单矩形积分）
+        double dx_robot = vx_robot * dt;
+        double dy_robot = vy_robot * dt;
+        double dtheta = wz * dt;
+        
+        // 7. 转换到世界坐标系（使用当前角度）
         double cos_theta = std::cos(current_theta_);
         double sin_theta = std::sin(current_theta_);
         
-        // 机器人坐标系 -> 世界坐标系 (使用过滤后的增量)
-        double delta_x_world = filtered_delta_x * cos_theta - filtered_delta_y * sin_theta;
-        double delta_y_world = filtered_delta_x * sin_theta + filtered_delta_y * cos_theta;
+        double dx_world = dx_robot * cos_theta - dy_robot * sin_theta;
+        double dy_world = dx_robot * sin_theta + dy_robot * cos_theta;
         
-        // 累加到世界坐标系位姿
-        current_x_ += delta_x_world;
-        current_y_ += delta_y_world;
-        current_theta_ += filtered_delta_theta;
+        // 8. 累加位姿
+        current_x_ += dx_world;
+        current_y_ += dy_world;
+        current_theta_ += dtheta;
         
         // 角度归一化到 [-π, π]
         current_theta_ = std::atan2(std::sin(current_theta_), std::cos(current_theta_));
         
-        // 计算速度（从位移增量估算）
-        // 假设数据更新周期约为50ms（与下位机窗口一致）
-        static uint32_t last_timestamp = 0;
-        float dt = 0.05f;  // 默认50ms
+        // 9. 更新世界坐标系速度（用于发布到 /odom）
+        current_vx_ = dx_world / dt;
+        current_vy_ = dy_world / dt;
+        current_wz_ = dtheta / dt;
         
-        if (last_timestamp != 0 && packet.timestamp > last_timestamp) {
-            dt = (packet.timestamp - last_timestamp) / 1000.0f;  // ms -> s
-        }
-        last_timestamp = packet.timestamp;
+        // 10. 发布调试数据
+        publishDebugData(packet, dx_world, dy_world, dtheta, dt, false);
         
-        // 速度 = 位移 / 时间（世界坐标系）
-        if (dt > 0.001f) {  // 避免除零
-            current_vx_ = delta_x_world / dt;
-            current_vy_ = delta_y_world / dt;
-            current_wz_ = filtered_delta_theta / dt;
-        }
-        
-        // 发布解析后的数据（用于调试）- 使用过滤后的数据
-        auto odom_data_msg = std_msgs::msg::Float32MultiArray();
-        odom_data_msg.data = {
-            static_cast<float>(filtered_delta_x),     // [0] 机器人坐标系增量X (过滤后)
-            static_cast<float>(filtered_delta_y),     // [1] 机器人坐标系增量Y (过滤后)
-            static_cast<float>(filtered_delta_theta), // [2] 角度增量 (过滤后)
-            dt,                                       // [3] 时间增量
-            static_cast<float>(delta_x_world),        // [4] 世界坐标系增量X
-            static_cast<float>(delta_y_world),        // [5] 世界坐标系增量Y
-            static_cast<float>(current_x_),           // [6] 累计位姿X
-            static_cast<float>(current_y_),           // [7] 累计位姿Y
-            static_cast<float>(current_theta_),       // [8] 累计位姿θ
-            packet.roll,                              // [9] IMU横滚角
-            packet.pitch,                             // [10] IMU俯仰角
-            packet.yaw,                               // [11] IMU航向角
-            packet.heading_diff                       // [12] 运动方向角
-        };
-        odom_data_pub_->publish(odom_data_msg);
-        
-        // 发布里程计消息
+        // 11. 发布里程计消息
         publishOdometry();
         
-        // 发布TF变换
+        // 12. 发布TF变换
         if (publish_tf_) {
             publishTransform();
         }
         
-        // 调试信息（增强版 - 包含IMU数据）
+        // 调试日志（详细版）
         RCLCPP_DEBUG(this->get_logger(), 
-                    "Delta: dx=%.4f dy=%.4f dθ=%.4f | Pose: x=%.3f y=%.3f θ=%.3f | "
-                    "IMU: R=%.2f P=%.2f Y=%.2f | dt=%.3fs",
-                    packet.disp_x, packet.disp_y, packet.delta_theta,
-                    current_x_, current_y_, current_theta_,
-                    packet.roll * 180.0f / M_PI, packet.pitch * 180.0f / M_PI, 
-                    packet.yaw * 180.0f / M_PI, dt);
+                    "速度: vx=%.3f vy=%.3f w=%.3f | dt=%.4fs | "
+                    "增量: dx=%.4f dy=%.4f dθ=%.4f | "
+                    "位姿: x=%.3f y=%.3f θ=%.3f",
+                    vx_robot, vy_robot, wz, dt,
+                    dx_world, dy_world, dtheta,
+                    current_x_, current_y_, current_theta_);
+    }
+    
+    // 发布调试数据（新版：适配速度积分架构）
+    void publishDebugData(const VisionSendPacket& packet, 
+                         double dx_world, double dy_world, double dtheta, 
+                         double dt, bool is_stationary)
+    {
+        auto odom_data_msg = std_msgs::msg::Float32MultiArray();
+        odom_data_msg.data = {
+            packet.chassis_vx,                    // [0] 机器人坐标系速度X (m/s)
+            packet.chassis_vy,                    // [1] 机器人坐标系速度Y (m/s)
+            packet.chassis_w,                     // [2] 角速度 (rad/s)
+            static_cast<float>(dt),               // [3] 时间增量 (s)
+            static_cast<float>(dx_world),         // [4] 世界坐标系位移增量X (m)
+            static_cast<float>(dy_world),         // [5] 世界坐标系位移增量Y (m)
+            static_cast<float>(current_x_),       // [6] 累计位姿X (m)
+            static_cast<float>(current_y_),       // [7] 累计位姿Y (m)
+            static_cast<float>(current_theta_),   // [8] 累计位姿θ (rad)
+            packet.roll,                          // [9] IMU横滚角 (rad)
+            packet.pitch,                         // [10] IMU俯仰角 (rad)
+            packet.yaw,                           // [11] IMU航向角 (rad)
+            static_cast<float>(dtheta),           // [12] 角度增量 (rad)
+            static_cast<float>(current_vx_),      // [13] 世界坐标系速度X (m/s)
+            static_cast<float>(current_vy_),      // [14] 世界坐标系速度Y (m/s)
+            static_cast<float>(is_stationary ? 1.0f : 0.0f)  // [15] 静止标志
+        };
+        odom_data_pub_->publish(odom_data_msg);
     }
     
     // 发布里程计消息
@@ -415,6 +475,9 @@ private:
     double current_vx_{0.0};
     double current_vy_{0.0};
     double current_wz_{0.0};
+    
+    // 时间基准 (ROS时间)
+    rclcpp::Time last_update_time_{0, 0, RCL_ROS_TIME};
     
     // 统计
     long packets_received_{0};

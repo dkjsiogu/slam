@@ -55,16 +55,19 @@
   <!-- 
     激光雷达关节：
     - 位置：向前 98mm (0.098m), 向左 65mm (0.065m)
-    - 旋转：雷达X轴向左(base_link的+Y方向)，需要绕Z轴旋转90度(π/2)
+    - 安装方式：雷达倒装（X轴朝后，Y轴朝右）
+    - 旋转：绕Z轴旋转-90度（-π/2 = -1.5708 rad）使雷达X轴朝后对齐
   -->
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
     <child link="laser"/>
     <!-- 
       xyz: 前(+X) 左(+Y) 上(+Z)
-      rpy: 绕Z轴旋转90度对齐雷达坐标系
+      rpy: 绕Z轴旋转-90度（270度）= -1.5708 rad
+           使雷达X轴指向base_link的-X（后方）
+           使雷达Y轴指向base_link的-Y（右侧）
     -->
-    <origin xyz="0.098 0.065 0.077" rpy="0 0 1.5708"/>
+    <origin xyz="0.098 0.065 0.077" rpy="0 0 3.1416"/>
     <axis xyz="0 0 1"/>
   </joint>
 

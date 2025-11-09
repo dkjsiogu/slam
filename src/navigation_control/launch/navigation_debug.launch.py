@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-导航调试启动文件
+导航调试启动文件 (已集成轮式里程计)
 功能:
-1. 加载地图
-2. 启动 AMCL 定位
-3. 简单路径规划和速度计算
-4. 全向轮串口控制
-5. RViz2 可视化
+1. RPLIDAR驱动 + 扫描过滤
+2. 轮式里程计 (发布 /odom 和 TF: odom->base_link)
+3. 地图服务器 (加载已保存的地图)
+4. AMCL定位 (map->odom TF)
+5. 简单导航控制器
+6. 串口通信 (全向轮控制)
+7. RViz2可视化
+
+TF树: map -> odom (AMCL) -> base_link (wheel_odom) -> laser (URDF)
+
+使用方法:
+    ros2 launch navigation_control navigation_debug.launch.py
+    ros2 launch navigation_control navigation_debug.launch.py map_file:=/path/to/map.yaml
 """
 
 from launch import LaunchDescription
@@ -87,12 +95,33 @@ def generate_launch_description():
             }],
         ),
         
-        # ============ TF 静态变换 (odom → base_link) ============
+        # ============ 轮式里程计节点 (发布 /odom 和 TF: odom->base_link) ============
         Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='odom_to_base_link',
-            arguments=['0', '0', '0', '0', '0', '0', 'odom', 'base_link'],
+            package='navigation_control',
+            executable='wheel_odometry_node',
+            name='wheel_odometry_node',
+            output='screen',
+            parameters=[{
+                'odom_frame': 'odom',
+                'base_frame': 'base_link',
+                'publish_tf': True,
+                'enable_crc_check': False,  # 导航时关闭CRC检查以提高容错性
+            }],
+        ),
+        
+        # ============ 串口通信 (双向通信) ============
+        Node(
+            package='navigation_control',
+            executable='serial_communication',
+            name='serial_communication',
+            output='screen',
+            parameters=[{
+                'serial_port': LaunchConfiguration('dev_board_port'),
+                'baudrate': 115200,
+                'timeout_ms': 100,
+                'auto_reconnect': True,
+                'reconnect_interval': 5.0,
+            }],
         ),
         
         # ============ 激光雷达 ============
@@ -115,14 +144,15 @@ def generate_launch_description():
         ),
         
         # ============ 激光扫描过滤器 (过滤机器人本体) ============
+        # 雷达倒装(X朝后Y朝右)，需过滤机器人后方本体
         Node(
             package='navigation_control',
             executable='scan_filter_node',
             name='scan_filter_node',
             output='screen',
             parameters=[{
-                'filter_angle_min': -2.42,  # -138.87° (右后角)
-                'filter_angle_max': 2.84,   # 163.00° (左后角)
+                'filter_angle_min': -2.30,  # -132° (左后角，雷达坐标系)
+                'filter_angle_max': 2.69,   # 154° (右后角，雷达坐标系)
                 'filter_range_max': 0.35,   # 只过滤 0.35m 以内的点
                 'input_topic': '/scan_raw',
                 'output_topic': '/scan',  # 输出到标准话题，替换原始扫描
@@ -239,33 +269,18 @@ def generate_launch_description():
             }]
         ),
         
-        # ============ 串口数据发布器 ============
+        # ============ 全向轮控制器 (cmd_vel -> 下位机协议) ============
         Node(
             package='navigation_control',
             executable='serial_data_publisher',
             name='serial_data_publisher',
             output='screen',
             parameters=[{
-                'max_vx': 5.0,
-                'max_vy': 5.0,
+                'max_vx': 1.0,
+                'max_vy': 1.0,
                 'max_wz': 2.0,
                 'velocity_timeout': 1.0,
                 'smooth_factor': 0.7,
-            }],
-        ),
-        
-        # ============ 串口通信 ============
-        Node(
-            package='navigation_control',
-            executable='serial_communication',
-            name='serial_communication',
-            output='screen',
-            parameters=[{
-                'serial_port': LaunchConfiguration('dev_board_port'),
-                'baudrate': 115200,
-                'timeout_ms': 100,
-                'auto_reconnect': True,
-                'reconnect_interval': 5.0,
             }],
         ),
         
