@@ -150,6 +150,7 @@ install(PROGRAMS
   scripts/odom_data_viewer.py
   scripts/test_velocity_pub.py
   scripts/keyboard_teleop.py
+  scripts/coordinate_checker.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -75,9 +75,9 @@ struct __attribute__((packed)) OmniWheelCmd {
     float vx;              // 前后速度 (m/s)
     float vy;              // 左右速度 (m/s)
     float wz;              // 旋转速度 (rad/s)
-    float flog;
-    float dx;
-    float dy;
+    // float flog;
+    // float dx;
+    // float dy;
     uint32_t timestamp;    // 时间戳 (ms)
     uint16_t checksum;     // CRC16校验
     
@@ -205,9 +205,9 @@ private:
         packet.wz = static_cast<float>(wz);
         
         // 填充颜色跟踪数据
-        packet.flog = tracking_valid_ ? 1.0f : 0.0f;  // 目标是否有效
-        packet.dx = static_cast<float>(tracking_rad_);  // 偏转角度 (rad)
-        packet.dy = static_cast<float>(tracking_dy_);   // 垂直偏移 (pixels)
+        // packet.flog = tracking_valid_ ? 1.0f : 0.0f;  // 目标是否有效
+        // packet.dx = static_cast<float>(tracking_rad_);  // 偏转角度 (rad)
+        // packet.dy = static_cast<float>(tracking_dy_);   // 垂直偏移 (pixels)
         
         packet.timestamp = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
