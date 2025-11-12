@@ -1,0 +1,9 @@
+[submodule "src/navigation_control"]
+	path = src/navigation_control
+	url = https://github.com/dkjsiogu/navigation_control.git
+[submodule "src/sllidar_ros2"]
+	path = src/sllidar_ros2
+	url = https://github.com/Slamtec/sllidar_ros2.git
+[submodule "src/get-toy"]
+	path = src/get-toy
+	url = https://github.com/zZ-strawberry/get-toy.git
