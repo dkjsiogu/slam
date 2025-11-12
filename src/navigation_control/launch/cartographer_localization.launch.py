@@ -180,17 +180,34 @@ def generate_launch_description():
             output='screen',
         ),
         
-        # ============ 简单导航控制器 (路径规划 + 速度计算) ============
+        # ============ A* 路径规划器 (矩形footprint + 障碍物距离代价) ============
+        Node(
+            package='navigation_control',
+            executable='astar_planner.py',
+            name='astar_planner',
+            output='screen',
+            parameters=[{
+                'robot_length': 0.262,         # 机器人长度 (262mm from URDF)
+                'robot_width': 0.270,          # 机器人宽度 (270mm from URDF)
+                'safety_margin': 0.03,         # 安全裕量 (3cm)
+                'diagonal_penalty': 1.2,       # 对角线移动惩罚 (略微惩罚，允许圆弧)
+                'smoothing_iterations': 20,    # 增加平滑迭代，生成更圆润的圆弧
+                'waypoint_spacing': 0.20,      # 路径点间距 (20cm，保留转角点)
+            }]
+        ),
+        
+        # ============ 路径跟踪控制器 (Pure Pursuit + 全向轮) ============
         Node(
             package='navigation_control',
             executable='simple_goal_controller.py',
-            name='simple_goal_controller',
+            name='path_tracker',
             output='screen',
             parameters=[{
-                'max_linear_vel': 0.5,      # 最大线速度
-                'max_angular_vel': 1.0,     # 最大角速度
-                'goal_tolerance': 0.1,      # 到达目标的容差 (10cm)
-                'lookahead_distance': 0.3,  # 前瞻距离
+                'max_linear_vel': 0.5,         # 最大线速度
+                'max_angular_vel': 0.3,        # 最大角速度（仅用于保持朝向）
+                'goal_tolerance': 0.10,        # 到达目标容差 (10cm)
+                'lookahead_distance': 0.5,     # Pure Pursuit 前瞻距离
+                'waypoint_tolerance': 0.15,    # 路径点切换容差
             }]
         ),
         

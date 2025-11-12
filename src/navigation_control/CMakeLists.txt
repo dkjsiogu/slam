@@ -9,19 +9,14 @@ endif()
 # Find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(rclcpp_action REQUIRED)
-find_package(rclcpp_lifecycle REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(visualization_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(nav2_msgs REQUIRED)
-find_package(nav2_util REQUIRED)
 
 # 串口库
 find_package(PkgConfig REQUIRED)
@@ -29,19 +24,14 @@ pkg_check_modules(SERIAL REQUIRED libserial)
 
 set(dependencies
   rclcpp
-  rclcpp_action
-  rclcpp_lifecycle
   std_msgs
   std_srvs
   geometry_msgs
   nav_msgs
   sensor_msgs
-  visualization_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs
-  nav2_msgs
-  nav2_util
 )
 
 # Include directories
@@ -50,86 +40,39 @@ include_directories(
   ${SERIAL_INCLUDE_DIRS}
 )
 
-# Mapping Manager Node
-add_executable(mapping_manager
-  src/mapping_manager.cpp
-)
-ament_target_dependencies(mapping_manager ${dependencies})
+# ============ 核心节点 ============
 
-# Localization Manager Node
-add_executable(localization_manager
-  src/localization_manager.cpp
+# Wheel Odometry Node (轮式里程计 - 发布/odom和TF)
+add_executable(wheel_odometry_node
+  src/wheel_odometry_node.cpp
 )
-ament_target_dependencies(localization_manager ${dependencies})
+ament_target_dependencies(wheel_odometry_node ${dependencies})
 
-# Navigation Controller Node
-add_executable(navigation_controller
-  src/navigation_controller.cpp
-)
-ament_target_dependencies(navigation_controller ${dependencies})
-
-# Serial Data Publisher Node (准备串口数据)
-add_executable(serial_data_publisher
-  src/serial_data_publisher.cpp
-)
-ament_target_dependencies(serial_data_publisher ${dependencies})
-
-# Robot State Manager Node (机器人状态管理)
-add_executable(robot_state_manager
-  src/robot_state_manager.cpp
-)
-ament_target_dependencies(robot_state_manager ${dependencies})
-
-# Serial Communication Node (实际串口通信)
+# Serial Communication Node (串口通信 - 接收下位机数据)
 add_executable(serial_communication
   src/serial_communication.cpp
 )
 ament_target_dependencies(serial_communication ${dependencies})
 target_link_libraries(serial_communication ${SERIAL_LIBRARIES})
 
-# Scan Filter Node (激光扫描过滤 - 过滤机器人本体)
+# Serial Data Publisher Node (速度命令转协议 - 发送到下位机)
+add_executable(serial_data_publisher
+  src/serial_data_publisher.cpp
+)
+ament_target_dependencies(serial_data_publisher ${dependencies})
+
+# Scan Filter Node (激光过滤 - 过滤机器人本体)
 add_executable(scan_filter_node
   src/scan_filter_node.cpp
 )
 ament_target_dependencies(scan_filter_node ${dependencies})
 
-# Obstacle Monitor Node (障碍物监控)
-add_executable(obstacle_monitor
-  src/obstacle_monitor.cpp
-)
-ament_target_dependencies(obstacle_monitor ${dependencies})
-
-# Manual Goal Setter Node (手动目标点设置)
-add_executable(manual_goal_setter
-  src/manual_goal_setter.cpp
-)
-ament_target_dependencies(manual_goal_setter ${dependencies})
-
-# Omni Wheel Controller Node (全向轮控制器)
-add_executable(omni_wheel_controller
-  src/omni_wheel_controller.cpp
-)
-ament_target_dependencies(omni_wheel_controller ${dependencies})
-
-# Wheel Odometry Node (轮式里程计节点)
-add_executable(wheel_odometry_node
-  src/wheel_odometry_node.cpp
-)
-ament_target_dependencies(wheel_odometry_node ${dependencies})
-
 # Install executables
 install(TARGETS
-  mapping_manager
-  localization_manager
-  navigation_controller
-  serial_data_publisher
-  robot_state_manager
-  serial_communication
-  scan_filter_node
-  obstacle_monitor
-  manual_goal_setter
-  omni_wheel_controller
   wheel_odometry_node
+  serial_communication
+  serial_data_publisher
+  scan_filter_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -141,16 +84,9 @@ install(DIRECTORY
 
 # Install Python scripts
 install(PROGRAMS
+  scripts/astar_planner.py
   scripts/simple_goal_controller.py
   scripts/map_republisher.py
-  scripts/initial_pose_setter.py
-  scripts/relocalize.py
-  scripts/serial_monitor.py
-  scripts/odom_to_path.py
-  scripts/odom_data_viewer.py
-  scripts/test_velocity_pub.py
-  scripts/keyboard_teleop.py
-  scripts/coordinate_checker.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -4,16 +4,24 @@
  * 
  * 功能:
  * 1. 订阅速度命令 (/cmd_vel)
- * 2. 转换为下位机协议: vx(m/s), vy(m/s), wz(rad/s)
- * 3. 通过串口发送给下位机全向轮控制器
+ * 2. 订阅颜色跟踪结果 (/color_tracking/result)
+ * 3. 转换为下位机 Vision_Recv_s 协议并通过串口发送
  * 
- * 协议格式 (19字节):
- * - header: 0xA5
- * - vx: float (4字节) - 前后速度 m/s
- * - vy: float (4字节) - 左右速度 m/s  
- * - wz: float (4字节) - 旋转速度 rad/s
- * - timestamp: uint32_t (4字节) - 时间戳 ms
+ * 协议格式 (31字节) - 匹配下位机 Vision_Recv_s 短包:
+ * - header: 0xA5 (1字节)
+ * - x: float (4字节) - dx 目标偏转角度 (rad)
+ * - y: float (4字节) - dy 目标垂直偏移 (pixels)
+ * - z: float (4字节) - flog 颜色跟踪有效标志
+ * - vx: float (4字节) - 前后速度 (m/s)
+ * - vy: float (4字节) - 左右速度 (m/s)
+ * - vz: float (4字节) - 旋转速度 (rad/s)
+ * - cap_timestamp: uint32_t (4字节) - 时间戳 (ms)
  * - checksum: uint16_t (2字节) - CRC16校验
+ * 
+ * 下位机读取映射:
+ * - Vision_Info.dx = recv_data.x
+ * - Vision_Info.dy = recv_data.y
+ * - Vision_Info.flog = recv_data.z
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -69,16 +77,17 @@ uint16_t Get_CRC16_Check_Sum(const uint8_t *pchMessage, uint32_t dwLength, uint1
     return wCRC;
 }
 
-// 全向轮控制协议 (简化版，19字节)
+// 全向轮控制协议 - 31字节短包格式（匹配下位机 DecodeVision）
+// 布局: header(1) + x(4) + y(4) + z(4) + vx(4) + vy(4) + wz(4) + timestamp(4) + CRC16(2) = 31字节
 struct __attribute__((packed)) OmniWheelCmd {
     uint8_t header;        // 0xA5
+    float x;               // dx - 目标偏转角度 (rad)
+    float y;               // dy - 目标垂直偏移 (pixels)  
+    float z;               // flog - 颜色跟踪有效标志
     float vx;              // 前后速度 (m/s)
     float vy;              // 左右速度 (m/s)
-    float wz;              // 旋转速度 (rad/s)
-    // float flog;
-    // float dx;
-    // float dy;
-    uint32_t timestamp;    // 时间戳 (ms)
+    float vz;              // 旋转速度 (rad/s) - 下位机读取为 wz
+    uint32_t cap_timestamp; // 时间戳 (ms)
     uint16_t checksum;     // CRC16校验
     
     // 计算CRC16
@@ -139,36 +148,49 @@ public:
         timeout_timer_ = this->create_wall_timer(
             100ms, std::bind(&SerialDataPublisher::checkTimeout, this));
         
+        // 定时器 - 持续发送数据包 (50Hz)
+        send_timer_ = this->create_wall_timer(
+            20ms, std::bind(&SerialDataPublisher::sendTimerCallback, this));
+        
         // 初始化时间戳
         last_cmd_time_ = this->now();
         
         RCLCPP_INFO(this->get_logger(), "全向轮控制节点已初始化");
         RCLCPP_INFO(this->get_logger(), "最大速度 - Vx: %.2f m/s, Vy: %.2f m/s, Wz: %.2f rad/s", 
                     max_vx_, max_vy_, max_wz_);
+        RCLCPP_INFO(this->get_logger(), "数据发送频率: 50 Hz");
     }
 
 private:
     // 颜色跟踪结果回调
     void colorTrackingCallback(const std_msgs::msg::String::SharedPtr msg)
     {
-        // 解析 get-toy 发布的字符串: "valid=1 rad=1.2345 dy=50"
+        // 解析 get-toy 发布的字符串: "1.00,0.52,120" (status,rad,y_offset)
         std::istringstream iss(msg->data);
-        std::string token;
+        std::string status_str, rad_str, dy_str;
         
-        while (iss >> token) {
-            if (token.find("valid=") == 0) {
-                tracking_valid_ = (std::stoi(token.substr(6)) == 1);
+        if (std::getline(iss, status_str, ',') &&
+            std::getline(iss, rad_str, ',') &&
+            std::getline(iss, dy_str)) {
+            
+            try {
+                float status = std::stof(status_str);
+                tracking_valid_ = (status > 0.5f);  // > 0.5 认为有效
+                tracking_rad_ = std::stod(rad_str);
+                tracking_dy_ = static_cast<int>(std::round(std::stof(dy_str)));
+                
+                RCLCPP_DEBUG(this->get_logger(), "颜色跟踪: valid=%d rad=%.3f dy=%d", 
+                            tracking_valid_, tracking_rad_, tracking_dy_);
+            } catch (const std::exception& e) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                   "解析颜色跟踪数据失败: %s", e.what());
+                tracking_valid_ = false;
             }
-            else if (token.find("rad=") == 0) {
-                tracking_rad_ = std::stod(token.substr(4));
-            }
-            else if (token.find("dy=") == 0) {
-                tracking_dy_ = std::stoi(token.substr(3));
-            }
+        } else {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                               "颜色跟踪数据格式错误: %s", msg->data.c_str());
+            tracking_valid_ = false;
         }
-        
-        RCLCPP_DEBUG(this->get_logger(), "颜色跟踪: valid=%d rad=%.3f dy=%d", 
-                    tracking_valid_, tracking_rad_, tracking_dy_);
     }
     
     // 速度命令回调
@@ -186,12 +208,15 @@ private:
         vy = std::clamp(vy, -max_vy_, max_vy_);
         wz = std::clamp(wz, -max_wz_, max_wz_);
         
-        // 平滑滤波
+        // 平滑滤波（不立即发送，由定时器统一发送）
         smoothed_vx_ = smooth_factor_ * smoothed_vx_ + (1.0 - smooth_factor_) * vx;
         smoothed_vy_ = smooth_factor_ * smoothed_vy_ + (1.0 - smooth_factor_) * vy;
         smoothed_wz_ = smooth_factor_ * smoothed_wz_ + (1.0 - smooth_factor_) * wz;
-        
-        // 发送
+    }
+    
+    // 定时发送回调 - 50Hz 持续发送
+    void sendTimerCallback()
+    {
         sendSerialData(smoothed_vx_, smoothed_vy_, smoothed_wz_);
     }
     
@@ -200,20 +225,28 @@ private:
     {
         OmniWheelCmd packet;
         packet.header = 0xA5;
+        
+        // 颜色跟踪数据映射（匹配下位机 Vision_Info 读取）
+        // 下位机: Vision_Info.dx = recv_data.x, dy = recv_data.y, flog = recv_data.z
+        packet.x = static_cast<float>(tracking_rad_);   // dx - 角度 (rad)
+        packet.y = static_cast<float>(tracking_dy_);    // dy - 垂直偏移 (pixels)
+        packet.z = tracking_valid_ ? 1.0f : 0.0f;       // flog - 有效标志
+        
+        // 速度控制
         packet.vx = static_cast<float>(vx);
         packet.vy = static_cast<float>(vy);
-        packet.wz = static_cast<float>(wz);
+        packet.vz = static_cast<float>(wz);
         
-        // 填充颜色跟踪数据
-        // packet.flog = tracking_valid_ ? 1.0f : 0.0f;  // 目标是否有效
-        // packet.dx = static_cast<float>(tracking_rad_);  // 偏转角度 (rad)
-        // packet.dy = static_cast<float>(tracking_dy_);   // 垂直偏移 (pixels)
-        
-        packet.timestamp = static_cast<uint32_t>(
+        packet.cap_timestamp = static_cast<uint32_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()
             ).count()
         );
+        
+    // 调试输出：显示发送的所有字段值（节流，避免日志刷屏）
+    // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+    //            "发送[31B] -> x(dx):%.3f y(dy):%.0f z(flog):%.1f | vx:%.2f vy:%.2f vz:%.2f",
+    //            packet.x, packet.y, packet.z, packet.vx, packet.vy, packet.vz);
         
         auto bytes = packet.toBytes();
         
@@ -260,6 +293,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr serial_data_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr serial_hex_pub_;
     rclcpp::TimerBase::SharedPtr timeout_timer_;
+    rclcpp::TimerBase::SharedPtr send_timer_;  // 50Hz 定时发送
     
     double max_vx_;
     double max_vy_;

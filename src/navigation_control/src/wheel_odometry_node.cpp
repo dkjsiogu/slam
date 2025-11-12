@@ -252,33 +252,8 @@ private:
         float vy_robot = packet.chassis_vy;  // 左侧速度 (m/s)
         float wz = packet.chassis_w;         // 角速度 (rad/s)
         
-        // 3.5 计算IMU yaw角速度（更准确的旋转测量）
+        // 3.5 读取IMU yaw角（用于后面计算变化量）
         double imu_yaw = packet.yaw;  // IMU航向角 (rad)
-        double imu_angular_velocity = 0.0;
-        bool use_imu_rotation = false;
-        
-        if (last_imu_yaw_valid_) {
-            // 计算yaw角度变化（处理跨越±π的情况）
-            double delta_yaw = imu_yaw - last_imu_yaw_;
-            
-            // 角度归一化到 [-π, π]
-            while (delta_yaw > M_PI) delta_yaw -= 2.0 * M_PI;
-            while (delta_yaw < -M_PI) delta_yaw += 2.0 * M_PI;
-            
-            // 计算角速度
-            imu_angular_velocity = delta_yaw / dt;
-            
-            // 判断是否使用IMU角速度（当角速度足够大时）
-            const double IMU_ANGULAR_THRESHOLD = 0.01;  // 0.57°/s
-            if (std::abs(imu_angular_velocity) > IMU_ANGULAR_THRESHOLD) {
-                use_imu_rotation = true;
-                wz = imu_angular_velocity;  // 使用IMU角速度替代编码器角速度
-            }
-        }
-        
-        // 更新IMU历史
-        last_imu_yaw_ = imu_yaw;
-        last_imu_yaw_valid_ = true;
         
         // 4. 速度死区过滤（过滤编码器噪声）
         const double VEL_THRESHOLD = 0.001;    // 1mm/s
@@ -286,7 +261,7 @@ private:
         
         if (std::abs(vx_robot) < VEL_THRESHOLD) vx_robot = 0.0f;
         if (std::abs(vy_robot) < VEL_THRESHOLD) vy_robot = 0.0f;
-        if (!use_imu_rotation && std::abs(wz) < ANGULAR_THRESHOLD) wz = 0.0f;
+        if (std::abs(wz) < ANGULAR_THRESHOLD) wz = 0.0f;
         
         // 5. 计算综合运动大小（用于静止判断）
         double translation_speed = std::sqrt(vx_robot*vx_robot + vy_robot*vy_robot);
@@ -301,7 +276,9 @@ private:
             current_vy_ *= 0.7;
             current_wz_ *= 0.7;
             
-            // 不积分位姿
+            // ⚠️ 静止时不积分位姿，同时冻结IMU Yaw更新（防止陀螺仪漂移累积）
+            // 保持 last_imu_yaw_ 不变，下次运动时会自动同步
+            
             publishDebugData(packet, 0.0, 0.0, 0.0, dt, true, false, false);
             publishOdometry();
             if (publish_tf_) publishTransform();
@@ -319,7 +296,6 @@ private:
         // 7. 机器人坐标系速度 -> 位移增量（简单矩形积分）
         double dx_robot = is_pure_rotation ? 0.0 : vx_robot * dt;  // 纯旋转时不累积xy
         double dy_robot = is_pure_rotation ? 0.0 : vy_robot * dt;  // 纯旋转时不累积xy
-        double dtheta = wz * dt;
         
         // 8. 转换到世界坐标系（使用当前角度）
         double cos_theta = std::cos(current_theta_);
@@ -331,16 +307,33 @@ private:
         // 9. 累加位姿
         current_x_ += dx_world;
         current_y_ += dy_world;
-        current_theta_ += dtheta;
         
-        // 角度归一化到 [-π, π]
-        current_theta_ = std::atan2(std::sin(current_theta_), std::cos(current_theta_));
+        // ⚠️ 使用IMU Yaw的变化量来更新累积角度（而非编码器角速度积分），IMU旋转测量更准确
+        double delta_yaw_for_pose = 0.0;
+        if (last_imu_yaw_valid_) {
+            // 计算IMU yaw变化量（处理跨越±π的情况）
+            delta_yaw_for_pose = imu_yaw - last_imu_yaw_;
+            
+            // 角度归一化到 [-π, π]
+            while (delta_yaw_for_pose > M_PI) delta_yaw_for_pose -= 2.0 * M_PI;
+            while (delta_yaw_for_pose < -M_PI) delta_yaw_for_pose += 2.0 * M_PI;
+            
+            // 累加角度变化量（而非直接用IMU Yaw绝对值，因为IMU初始角度可能不是0）
+            current_theta_ += delta_yaw_for_pose;
+            
+            // 角度归一化到 [-π, π]
+            current_theta_ = std::atan2(std::sin(current_theta_), std::cos(current_theta_));
+        }
+        
+        // 更新IMU yaw历史（为下一帧计算变化量做准备）
+        last_imu_yaw_ = imu_yaw;
+        last_imu_yaw_valid_ = true;
         
         // 10. 更新速度
         // 世界坐标系速度（用于调试显示）
         current_vx_ = dx_world / dt;
         current_vy_ = dy_world / dt;
-        current_wz_ = dtheta / dt;
+        current_wz_ = delta_yaw_for_pose / dt;  // 使用IMU yaw变化量计算角速度
         
         // 机器人坐标系速度（用于发布Odometry消息）
         current_vx_robot_ = vx_robot;
@@ -348,7 +341,7 @@ private:
         current_wz_robot_ = wz;
         
         // 11. 发布调试数据
-        publishDebugData(packet, dx_world, dy_world, dtheta, dt, false, is_pure_rotation, use_imu_rotation);
+        publishDebugData(packet, dx_world, dy_world, delta_yaw_for_pose, dt, false, is_pure_rotation, true);
         
         // 12. 发布里程计消息
         publishOdometry();
@@ -360,11 +353,11 @@ private:
         
         // 调试日志（详细版）
         RCLCPP_DEBUG(this->get_logger(), 
-                    "速度: vx=%.3f vy=%.3f w=%.3f%s | dt=%.4fs | "
-                    "增量: dx=%.4f dy=%.4f dθ=%.4f%s | "
+                    "速度: vx=%.3f vy=%.3f w=%.3f | dt=%.4fs | "
+                    "增量: dx=%.4f dy=%.4f dθ=%.4f(IMU)%s | "
                     "位姿: x=%.3f y=%.3f θ=%.3f",
-                    vx_robot, vy_robot, wz, use_imu_rotation ? "(IMU)" : "", dt,
-                    dx_world, dy_world, dtheta, is_pure_rotation ? " [纯旋转-不累积XY]" : "",
+                    vx_robot, vy_robot, wz, dt,
+                    dx_world, dy_world, delta_yaw_for_pose, is_pure_rotation ? " [纯旋转-不累积XY]" : "",
                     current_x_, current_y_, current_theta_);
     }
     
