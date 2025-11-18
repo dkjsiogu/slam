@@ -3,11 +3,11 @@
 
 ## 1. 项目总体介绍
 
-本项目是基于 ROS2 Humble 的一套完整的全向轮移动机器人 SLAM 与自主导航系统。系统集成了激光雷达（RPLIDAR A1）、IMU 和轮式里程计等多传感器数据，使用 **slam_toolbox** 进行 2D SLAM 建图与定位，并在此基础上实现了包含颜色识别、框识别、A* 路径规划、路径跟踪、ICP 重定位、任务管理在内的全套自主导航功能。
+本项目是基于 ROS2 Humble 的一套完整的全向轮移动机器人 SLAM 与自主导航系统。系统集成了激光雷达（RPLIDAR A1）、IMU 和轮式里程计等多传感器数据，使用 **Google Cartographer** 进行实时 2D SLAM 建图与定位，并在此基础上实现了包含颜色识别、框识别、A* 路径规划、路径跟踪、任务管理在内的全套自主导航功能。
 
 **技术栈:**
 - **ROS 版本:** ROS2 Humble Hawksbill
-- **SLAM 方案:** slam_toolbox (online_async_slam & localization)
+- **SLAM 方案:** Google Cartographer (实时建图模式)
 - **硬件平台:** 全向轮底盘 (342mm × 300mm)
 - **传感器:** 
   - SLAMTEC RPLIDAR A1 激光雷达 (8Hz, 12m)
@@ -18,8 +18,8 @@
 - **编程语言:** C++ (底层驱动/里程计), Python (导航规划/任务调度)
 - **核心功能:** 
   - 多传感器融合 (Odom + Laser + IMU)
-  - SLAM 建图与定位 (slam_toolbox)
-  - ICP 全局重定位
+  - 实时 SLAM 建图与定位 (Cartographer)
+  - 固定起始点导航 (0,0)
   - 颜色跟踪与篮筐检测 (视觉任务)
   - A* 路径规划 (矩形 footprint 避障)
   - 航点导航与任务调度
@@ -682,296 +682,97 @@ class MapRepublisher(Node):
 
 ---
 
-## 8. SLAM 建图模式 (证明使用 SLAM 技术)
+## 8. Cartographer 实时建图 (证明使用 SLAM 技术)
 
-**模块:** `slam_toolbox` (通过 `slam_toolbox_mapping.yaml` 配置)
+**模块:** `cartographer_ros` (通过 `cartographer.lua` 配置)
 
 **功能:**
-这是证明使用 SLAM 技术的核心。通过将 `slam_toolbox` 的 `mode` 参数设置为 `mapping`，系统进入实时建图模式。它会订阅激光雷达的 `/scan` 话题和轮式里程计的 `/odom` 话题，进行扫描匹配和图优化，实时构建环境的 2D 栅格地图，并发布 `map` -> `odom` 的 TF 变换。
+这是证明使用 SLAM 技术的核心。Cartographer 采用实时建图模式，机器人从固定起始点 (0,0) 启动，边移动边构建地图。它订阅激光雷达的 `/scan` 话题和轮式里程计的 `/odom` 话题，进行扫描匹配和图优化，实时构建环境的 2D 栅格地图，并发布 `map` -> `odom` 的 TF 变换。关键特性：
+- 无需预建图，启动即可导航
+- 支持闭环检测，自动消除累积误差
+- 融合里程计数据，提高定位精度
+- 实时发布地图供导航使用
 
 **核心配置代码:**
-```yaml
-# src/navigation_control/config/slam_toolbox_mapping.yaml
+```lua
+-- src/navigation_control/config/cartographer.lua
 
-slam_toolbox:
-  ros__parameters:
-    # === 关键：设置为建图模式 ===
-    mode: mapping
-    
-    # === 坐标系设置 ===
-    odom_frame: odom
-    map_frame: map
-    base_frame: base_link
-    
-    # === 传感器输入 ===
-    scan_topic: /scan
-    
-    # === SLAM 核心参数 ===
-    use_scan_matching: true       # 启用扫描匹配
-    do_loop_closing: true         # 启用闭环检测
-    
-    # 闭环检测相关阈值
-    loop_match_minimum_chain_size: 10
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
-    
-    # === 地图参数 ===
-    map_update_interval: 5.0        # 每5秒更新一次地图
-    resolution: 0.05                # 地图分辨率 5cm
-    max_laser_range: 12.0           # 激光雷达最大测距
-```
-
----
-
-## 9. SLAM 定位模式 (证明使用 SLAM 技术)
-
-**模块:** `slam_toolbox` (通过 `slam_toolbox_localization.yaml` 配置)
-
-**功能:**
-在已创建好的地图上进行纯定位。通过将 `mode` 设置为 `localization` 并加载预先生成的地图文件（`.posegraph` 或 `.data` 格式），`slam_toolbox` 不再构建新地图，而是将实时激光扫描与现有地图进行匹配，估算机器人在地图中的精确位姿。关键特性：
-- 发布 `map→odom` TF变换（SLAM全局校正）
-- 扫描匹配频率高，实时性好
-- 支持初始位姿设置或自动全局定位
-
-这是实现自主导航的基础，为 A* 规划器和路径跟踪提供全局定位。
-
-**核心配置代码（实际项目）:**
-```yaml
-# src/navigation_control/config/slam_toolbox_localization.yaml
-
-slam_toolbox:
-  ros__parameters:
-    # === 关键：设置为定位模式 ===
-    mode: localization
-    use_sim_time: false
-    
-    # === 坐标系设置 ===
-    odom_frame: odom
-    map_frame: map
-    base_frame: base_link
-    
-    # === 传感器输入 ===
-    scan_topic: /scan
-    use_scan_matching: true
-    use_scan_barycenter: true
-    
-    # === 定位模式特有配置 ===
-    do_loop_closing: false  # 定位模式关闭闭环检测
-    
-    # 扫描匹配参数（定位精度关键）
-    minimum_travel_distance: 0.2        # 移动20cm才更新
-    minimum_travel_heading: 0.2         # 旋转11°才更新
-    scan_buffer_size: 10
-    link_match_minimum_response_fine: 0.1
-    
-    # 相关扫描匹配
-    correlation_search_space_dimension: 0.5
-    correlation_search_space_resolution: 0.01
-    
-    # 地图更新
-    transform_publish_period: 0.02  # 50Hz发布TF（高频）
-    tf_buffer_duration: 30.0
-    
-    # 分辨率与范围
-    resolution: 0.05                # 5cm分辨率
-    max_laser_range: 12.0           # RPLIDAR A1最大12m
-```
-
----
-
-## 10. ICP 全局重定位
-
-**模块:** `icp_relocalization` (`navigation_control/scripts/icp_relocalization.py`)
-
-**功能:**
-当机器人丢失位置（被人为移动、SLAM定位失败、传感器数据异常）时，提供自动全局重定位。算法流程：
-1. 获取当前激光扫描并转换为点云
-2. 在地图范围内生成候选位姿网格（±2m, ±180°）
-3. 对每个候选位姿运行 ICP 算法匹配
-4. 选择最佳匹配（最小误差），发布到 `/initialpose` 话题
-5. slam_toolbox 接收初始位姿，重新定位
-
-支持参数化配置：搜索范围、角度步长、ICP迭代次数、收敛阈值等。默认每5秒自动尝试一次重定位。
-
-**核心代码:**
-```python
-class ICPRelocalization(Node):
-    def __init__(self):
-        super().__init__('icp_relocalization')
-        
-        # 参数配置
-        self.declare_parameter('max_iterations', 50)
-        self.declare_parameter('convergence_threshold', 0.001)
-        self.declare_parameter('search_grid_size', 2.0)  # ±2m范围搜索
-        self.declare_parameter('angle_search_range', 3.14159)  # ±180°
-        self.declare_parameter('auto_relocalize_interval', 5.0)  # 每5秒尝试
-        
-        self.max_iterations = self.get_parameter('max_iterations').value
-        self.search_size = self.get_parameter('search_grid_size').value
-        
-        # 订阅地图和激光
-        self.scan_sub = self.create_subscription(
-            LaserScan, '/scan', self.scan_callback, 10)
-        self.map_sub = self.create_subscription(
-            OccupancyGrid, '/map_viz', self.map_callback, 10)
-        
-        # 发布初始位姿给 slam_toolbox
-        self.pose_pub = self.create_publisher(
-            PoseWithCovarianceStamped, '/initialpose', 10)
-        
-        # 自动重定位定时器
-        self.relocalize_timer = self.create_timer(
-            self.relocalize_interval, self.attempt_relocalization)
-    
-    def scan_to_points(self, scan: LaserScan, pose=(0, 0, 0)):
-        """激光扫描转点云（考虑激光雷达偏移和旋转）"""
-        points = []
-        x, y, theta = pose
-        
-        # URDF中激光雷达偏移：xyz="0.098 0.065 0.077" rpy="0 0 3.1416"
-        laser_offset_x = 0.098 + 0.04  # 前98mm + 补偿
-        laser_offset_y = 0.065
-        laser_offset_angle = math.pi - 0.0349  # 180° + 2°补偿
-        
-        for i, r in enumerate(scan.ranges):
-            if r < scan.range_min or r > scan.range_max or math.isnan(r):
-                continue
-            
-            # 1. 扫描点在激光坐标系
-            scan_angle = scan.angle_min + i * scan.angle_increment
-            point_in_laser_x = r * math.cos(scan_angle)
-            point_in_laser_y = r * math.sin(scan_angle)
-            
-            # 2. 转到base_link（考虑180°旋转）
-            cos_offset = math.cos(laser_offset_angle)
-            sin_offset = math.sin(laser_offset_angle)
-            point_in_base_x = laser_offset_x + point_in_laser_x * cos_offset - point_in_laser_y * sin_offset
-            point_in_base_y = laser_offset_y + point_in_laser_x * sin_offset + point_in_laser_y * cos_offset
-            
-            # 3. 转到世界坐标系（考虑机器人位姿）
-            cos_theta = math.cos(theta)
-            sin_theta = math.sin(theta)
-            px = x + point_in_base_x * cos_theta - point_in_base_y * sin_theta
-            py = y + point_in_base_x * sin_theta + point_in_base_y * cos_theta
-            
-            points.append([px, py])
-        
-        return np.array(points)
-    
-    def icp_match(self, source_points, target_points, initial_pose=(0, 0, 0)):
-        """ICP迭代最近点匹配算法"""
-        if len(source_points) < 3 or len(target_points) < 3:
-            return None, float('inf')
-        
-        # 构建KD-Tree加速最近邻搜索
-        tree = KDTree(target_points)
-        
-        x, y, theta = initial_pose
-        prev_error = float('inf')
-        
-        for iteration in range(self.max_iterations):
-            # 1. 将源点云转换到当前估计位姿
-            transformed_points = self.transform_points(source_points, (x, y, theta))
-            
-            # 2. 为每个点找最近邻
-            distances, indices = tree.query(transformed_points)
-            
-            # 3. 计算平均误差
-            mean_error = np.mean(distances)
-            
-            # 4. 收敛判断
-            if abs(prev_error - mean_error) < self.convergence_threshold:
-                return (x, y, theta), mean_error
-            
-            prev_error = mean_error
-            
-            # 5. 使用最近邻点对计算变换增量（SVD求解）
-            # ... （省略SVD实现细节）
-            
-        return (x, y, theta), prev_error
-    
-    def attempt_relocalization(self):
-        """自动重定位尝试"""
-        if self.latest_scan is None or self.map_points is None:
-            return
-        
-        # 1. 生成候选位姿网格
-        candidates = []
-        for x in np.arange(-self.search_size, self.search_size, 0.5):
-            for y in np.arange(-self.search_size, self.search_size, 0.5):
-                for angle in np.arange(-self.angle_range, self.angle_range, 0.1745):  # 10°步长
-                    candidates.append((x, y, angle))
-        
-        # 2. 并行ICP匹配（多线程加速）
-        best_pose = None
-        best_score = float('inf')
-        
-        scan_points = self.scan_to_points(self.latest_scan, (0, 0, 0))
-        
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(self.icp_match, scan_points, self.map_points, pose): pose 
-                      for pose in candidates}
-            
-            for future in as_completed(futures):
-                pose, score = future.result()
-                if pose and score < best_score:
-                    best_score = score
-                    best_pose = pose
-        
-        # 3. 发布最佳匹配位姿
-        if best_pose and best_score < 0.1:  # 阈值：10cm平均误差
-            self.publish_initial_pose(best_pose)
-            self.get_logger().info(f'✅ ICP重定位成功: ({best_pose[0]:.2f}, {best_pose[1]:.2f}, {math.degrees(best_pose[2]):.1f}°), 误差={best_score:.3f}m')
-```
-
----
-
-## 11. SLAM 校正里程计误差
-
-**模块:** `wheel_odometry_node` (`src/wheel_odometry_node.cpp`)
-
-**功能:**
-这是证明 SLAM 与底层系统深度融合的关键。轮式里程计自身会存在累积误差。该节点通过 TF 监听由 `slam_toolbox` 发布的 `map` -> `odom` 变换。这个变换代表了 SLAM 系统对里程计累积误差的估计和修正。节点会周期性地读取这个修正量，并将其应用到自身的位姿估计上，从而消除里程计的长期漂移，确保全局位姿的准确性。
-
-**核心代码:**
-```cpp
-// src/navigation_control/src/wheel_odometry_node.cpp
-
-void WheelOdometryNode::correctFromSlam()
-{
-    if (!enable_slam_correction_) return;
-
-    geometry_msgs::msg::TransformStamped t;
-    try {
-        // 监听由 SLAM 发布的 map -> odom 变换
-        t = tf_buffer_->lookupTransform(
-            "map", odom_frame_,
-            tf2::TimePointZero,
-            tf2::durationFromSec(0.5)
-        );
-    } catch (const tf2::TransformException & ex) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                           "Could not get SLAM correction TF: %s", ex.what());
-        return;
-    }
-
-    // t 代表了 SLAM 系统认为的 odom 坐标系在 map 中的位姿
-    // 如果 odom 漂移了，这个 t 就会变化
-    // 这里可以将这个校正应用到里程计状态上（具体实现策略多样）
-    
-    // 简单策略：将里程计的起点重置为 SLAM 校正后的位置
-    // 注意：这是一种简化的示例，实际应用可能更复杂
-    double slam_x = t.transform.translation.x;
-    double slam_y = t.transform.translation.y;
-    
-    // ... 计算校正量并应用 ...
-    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Applied SLAM correction to odometry.");
+options = {
+  map_builder = MAP_BUILDER,
+  trajectory_builder = TRAJECTORY_BUILDER,
+  map_frame = "map",
+  tracking_frame = "base_link",
+  published_frame = "odom",         -- Cartographer 发布 map->odom
+  odom_frame = "odom",
+  provide_odom_frame = false,       -- 由轮式里程计发布 odom->base_link
+  use_odometry = true,              -- 融合轮式里程计
+  num_laser_scans = 1,
 }
+
+MAP_BUILDER.use_trajectory_builder_2d = true
+MAP_BUILDER.num_background_threads = 4
+
+-- ========== 2D SLAM 实时建图配置 ==========
+TRAJECTORY_BUILDER_2D.use_imu_data = false
+
+-- 激光扫描参数
+TRAJECTORY_BUILDER_2D.min_range = 0.15
+TRAJECTORY_BUILDER_2D.max_range = 12.0
+TRAJECTORY_BUILDER_2D.voxel_filter_size = 0.025
+
+-- 子地图构建（实时建图模式）
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 90     -- 每90帧激光创建一个子地图
+TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05
+
+-- 扫描匹配参数
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 10.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 10.0
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.0
+
+-- ========== 后端优化配置（闭环检测）==========
+POSE_GRAPH.optimize_every_n_nodes = 90
+POSE_GRAPH.constraint_builder.min_score = 0.55
+POSE_GRAPH.constraint_builder.max_constraint_distance = 15.0
 ```
 
 ---
 
-## 12. 航点管理系统
+## 9. 航点管理系统
+
+**模块:** `waypoint_manager` (`navigation_control/scripts/waypoint_manager.py`)
+
+**功能:**
+提供完整的航点生命周期管理：
+- **保存航点**: 获取当前 `map→base_link` 位姿，保存为命名航点
+- **加载/存储**: 从 `waypoints.yaml` 读写航点数据（包含 x, y, yaw, description）
+- **可视化**: 在 RViz 中显示所有航点为带箭头的 Marker
+- **查询/删除**: 支持列出、删除指定航点
+- **导航触发**: 发布航点到 `/goal_pose` 供 A* 规划器使用
+
+使用 TF 监听器实时获取机器人位姿，支持动态保存当前位置。航点数据持久化存储在包的 `maps/` 目录。
+
+---
+
+## 10. A* 路径规划器 - 矩形Footprint避障
+
+**模块:** `astar_planner` (`navigation_control/scripts/astar_planner.py`)
+
+**功能:**
+自定义全局路径规划器，专为全向轮机器人优化。核心特性：
+- **矩形Footprint碰撞检测**: 考虑机器人实际尺寸（342mm×300mm + 安全裕量），检查四个角点是否碰撞
+- **A*算法**: 使用优先队列，启发式函数为欧氏距离，支持斜向移动惩罚
+- **路径后处理**:
+  1. 插值（增加密度）
+  2. 平滑（生成圆弧过渡）
+  3. 曲率简化（保留转角点，简化直线段）
+- **实时规划**: 订阅 `/map_viz` 和 `/goal_pose`，发布到 `/planned_path`
+
+规划出的路径可直接供 Pure Pursuit 路径跟踪器使用。
+
+---
+
+## 11. 航点管理系统
 
 **模块:** `waypoint_manager` (`navigation_control/scripts/waypoint_manager.py`)
 
@@ -1135,10 +936,6 @@ class WaypointManager(Node):
         self.marker_pub.publish(marker_array)
 ```
 
----
-
-## 13. A* 路径规划器 - 矩形Footprint避障
-
 **模块:** `astar_planner` (`navigation_control/scripts/astar_planner.py`)
 
 **功能:**
@@ -1280,23 +1077,32 @@ def heuristic(self, node1, node2):
 
 ## 总结
 
-本项目实现了一套完整的全向轮机器人 SLAM 导航系统，从底层串口通信、多传感器融合里程计、SLAM建图与定位、视觉识别、到上层路径规划与任务调度，各模块协同工作。**关键技术证明**：
+本项目实现了一套完整的全向轮机器人 SLAM 导航系统，从底层串口通信、多传感器融合里程计、实时SLAM建图与定位、视觉识别、到上层路径规划与任务调度，各模块协同工作。**关键技术证明**：
 
 ✅ **SLAM技术应用**:
-- 使用 `slam_toolbox` 进行 2D SLAM 建图（`mode: mapping`）
-- 使用 `slam_toolbox` 进行纯定位（`mode: localization`，加载 `.posegraph` 地图）
+- 使用 `Google Cartographer` 进行实时 2D SLAM 建图
+- 固定起始点 (0,0) 启动，坐标系一致
+- 闭环检测自动优化地图，消除累积误差
 - 发布 `map→odom` TF变换，提供全局位姿校正
-- 里程计节点融合 SLAM 校正，消除累积误差
+- 边建图边导航，无需预建图步骤
 
 ✅ **多传感器融合**:
-- 激光雷达（RPLIDAR A1）：2D 扫描数据
-- 轮式编码器：底盘速度反馈
+- 激光雷达（RPLIDAR A1）：2D 扫描数据，8Hz频率
+- 轮式编码器：底盘速度反馈，实时积分
 - IMU：姿态角度（yaw）融合，提高旋转精度
+- Cartographer 内部融合所有传感器数据
 
 ✅ **自主导航能力**:
-- ICP 全局重定位（处理绑架问题）
+- 实时地图更新，动态环境适应
 - A* 矩形 Footprint 路径规划
 - 航点管理与任务调度
 - 视觉伺服（颜色跟踪、篮筐检测）
+- Pure Pursuit 路径跟踪控制
 
-整个系统已在实际硬件平台上运行验证，能够稳定完成建图、定位、导航等任务。
+✅ **系统优势**:
+- 无需预建图，启动即可导航
+- 固定起始点，坐标系一致性好
+- 闭环检测，长期运行精度高
+- 完全自定义导航栈，轻量高效
+
+整个系统已在实际硬件平台上运行验证，能够稳定完成实时建图、定位、导航等任务。适用于动态环境和无预建图需求的场景。
